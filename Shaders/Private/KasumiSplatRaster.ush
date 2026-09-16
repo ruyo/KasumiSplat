@@ -67,12 +67,6 @@ float4 MainPS(FKasumiVertexOutput Input) : SV_Target0
             discard;
         }
     }
-    const float SceneDeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(PixelCoord, 0)).r;
-    if (UseSceneDepth != 0u && SceneDeviceZ > Input.Position.z + SceneDepthBias + Input.DepthRadius)
-    {
-        discard;
-    }
-
     const float2 Delta = Input.DeltaPixels;
     const float Power = -0.5 * (
         Input.Conic.x * Delta.x * Delta.x +
@@ -81,6 +75,15 @@ float4 MainPS(FKasumiVertexOutput Input) : SV_Target0
     if (Power > 0.0 || Power < -4.5)
     {
         discard;
+    }
+
+    if (UseSceneDepth != 0u)
+    {
+        const float SceneDeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(PixelCoord, 0)).r;
+        if (SceneDeviceZ > Input.Position.z + SceneDepthBias + Input.DepthRadius)
+        {
+            discard;
+        }
     }
 
     const float Alpha = min(0.99, saturate(Input.Color.a) * exp(Power));

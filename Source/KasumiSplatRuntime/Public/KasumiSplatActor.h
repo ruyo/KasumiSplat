@@ -6,13 +6,13 @@
 
 class UKasumiSplatComponent;
 
-UCLASS()
+UCLASS(PrioritizeCategories=("Asset", "Appearance", "Effects", "Quality", "Rendering", "Streaming", "Performance", "Debug"))
 class KASUMISPLATRUNTIME_API AKasumiSplatActor : public AActor
 {
     GENERATED_BODY()
 public:
     AKasumiSplatActor();
 
-    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="KasumiSplat")
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Asset")
     TObjectPtr<UKasumiSplatComponent> SplatComponent;
 };

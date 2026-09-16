@@ -21,6 +21,7 @@ void CullCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     float4 LayerColor = 1.0;
     float3 TransformedLocalPosition = 0.0;
     float3 Covariance = 0.0;
+    float EffectiveAlpha = 0.0;
     [loop]
     for (uint CandidateOffset = 0u; CandidateOffset < GroupCount; ++CandidateOffset)
     {
@@ -43,12 +44,13 @@ void CullCS(uint3 DispatchThreadId : SV_DispatchThreadID)
             CandidateLayerScale,
             CandidateLayerColor,
             CandidateLocalPosition);
-        const float3 CandidateCovariance = ComputeCovariance(
+        const float4 CandidateFilteredCovariance = ComputeCovariance(
             CandidateCenterClip,
             CandidateRotation,
             CandidateSigmaAndAlpha,
             CandidateWeight,
-            CandidateLayerScale).xyz;
+            CandidateLayerScale);
+        const float3 CandidateCovariance = CandidateFilteredCovariance.xyz;
         const float CandidateDeterminant =
             CandidateCovariance.x * CandidateCovariance.z - CandidateCovariance.y * CandidateCovariance.y;
         const float2 CandidateNdc = CandidateCenterClip.xy / max(CandidateCenterClip.w, 1.0e-6);
@@ -56,10 +58,19 @@ void CullCS(uint3 DispatchThreadId : SV_DispatchThreadID)
             CandidateCenterClip.z >= 0.0 && CandidateCenterClip.z <= CandidateCenterClip.w &&
             CandidateDeterminant > 1.0e-8 &&
             abs(CandidateNdc.x) <= 1.25 && abs(CandidateNdc.y) <= 1.25;
-        const float CandidateAlpha = ApplyOpacityDensity(CandidateSigmaAndAlpha.w) *
-            TransitionOpacity(CandidateIndex) * max(CandidateLayerColor.a, 0.0) * max(StyleValues.y, 0.0);
+        const float CandidateEffectAlpha = lerp(1.0, EffectTint.a, CandidateWeight);
+        const float CandidateEffectOpacity = lerp(1.0, EffectValues.y, CandidateWeight);
+        const float CandidateEffectiveAlpha = saturate(
+            ApplyOpacityDensity(CandidateSigmaAndAlpha.w) *
+            TransitionOpacity(CandidateIndex) *
+            max(StyleValues.y, 0.0) *
+            max(Tint.a, 0.0) *
+            max(CandidateEffectAlpha, 0.0) *
+            max(CandidateEffectOpacity, 0.0) *
+            max(CandidateLayerColor.a, 0.0) *
+            max(CandidateFilteredCovariance.w, 0.0));
         const float Importance = bCandidateProjectable
-            ? CandidateAlpha * sqrt(max(CandidateDeterminant, 0.0))
+            ? CandidateEffectiveAlpha * sqrt(max(CandidateDeterminant, 0.0))
             : -1.0;
         if (Importance > BestImportance ||
             (Importance == BestImportance && CandidateStableId < StableId))
@@ -75,6 +86,7 @@ void CullCS(uint3 DispatchThreadId : SV_DispatchThreadID)
             LayerColor = CandidateLayerColor;
             TransformedLocalPosition = CandidateLocalPosition;
             Covariance = CandidateCovariance;
+            EffectiveAlpha = CandidateEffectiveAlpha;
         }
     }
 
@@ -97,6 +109,7 @@ void CullCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         CenterClip.w > 0.01 &&
         CenterClip.z >= 0.0 && CenterClip.z <= CenterClip.w &&
         Determinant > 1.0e-8 &&
+        EffectiveAlpha >= KASUMI_MIN_EFFECTIVE_ALPHA &&
         MaxRadius >= ProjectedRadiusRange.x &&
         abs(Ndc.x) <= 1.0 + NdcRadius.x &&
         abs(Ndc.y) <= 1.0 + NdcRadius.y &&

@@ -3,6 +3,8 @@
 
 #define KASUMI_BUCKET_COUNT 4096u
 #define KASUMI_INVALID_BUCKET 0xffffffffu
+// Reject only conservatively negligible center-alpha contributions.
+#define KASUMI_MIN_EFFECTIVE_ALPHA 0.0001
 
 StructuredBuffer<float4> PointData;
 StructuredBuffer<float4> SHData;

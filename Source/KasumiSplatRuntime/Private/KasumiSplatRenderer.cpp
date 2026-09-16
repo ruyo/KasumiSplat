@@ -489,6 +489,11 @@ public:
             CullParameters->LocalToWorld = LocalToWorld;
             CullParameters->WorldToClip = WorldToClip;
             CullParameters->ViewSize = ViewSize;
+            CullParameters->Tint = FVector4f(
+                Entry->Packet.Style.Tint.R,
+                Entry->Packet.Style.Tint.G,
+                Entry->Packet.Style.Tint.B,
+                Entry->Packet.Style.Tint.A);
             CullParameters->StyleValues = StyleValues;
             CullParameters->AppearanceValues = AppearanceValues;
             CullParameters->OpacityDensity = OpacityDensity;

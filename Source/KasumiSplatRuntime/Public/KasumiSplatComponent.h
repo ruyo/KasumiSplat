@@ -13,7 +13,10 @@ class UVolumeTexture;
 struct FKasumiSplatStreamingState;
 
 /** Scene component that publishes immutable source splats to the GPU renderer. */
-UCLASS(ClassGroup=Rendering, meta=(BlueprintSpawnableComponent))
+UCLASS(
+    ClassGroup=Rendering,
+    PrioritizeCategories=("Asset", "Appearance", "Effects", "Quality", "Rendering", "Streaming", "Performance", "Debug"),
+    meta=(BlueprintSpawnableComponent))
 class KASUMISPLATRUNTIME_API UKasumiSplatComponent : public USceneComponent
 {
     GENERATED_BODY()
@@ -21,164 +24,164 @@ public:
     UKasumiSplatComponent();
     virtual ~UKasumiSplatComponent() override;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Appearance")
     FKasumiSplatStyle Style;
 
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="KasumiSplat|Appearance")
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Appearance")
     EKasumiSplatAppearancePreset AppearancePreset = EKasumiSplatAppearancePreset::Reference;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Appearance")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Appearance")
     FKasumiSplatAppearance Appearance;
 
     /** Reusable ordered layers reserved for material, Niagara and Sequencer-driven looks. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Effect")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Effects")
     TArray<FKasumiSplatEffectLayer> EffectLayers;
 
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="KasumiSplat|Performance")
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Quality")
     EKasumiSplatQuality QualityPreset = EKasumiSplatQuality::High;
 
     /** Selects the GPU visibility and transparency ordering path. Auto currently chooses global radix sorting up to the configured point budget. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Rendering")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering")
     EKasumiSplatSortMode SortMode = EKasumiSplatSortMode::Auto;
 
     /** Screen-tile edge length used by Tiled sorting. Values are rounded to a multiple of 8. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Rendering|Tiled", meta=(ClampMin="16", ClampMax="128", UIMin="16", UIMax="128"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Tiled", meta=(ClampMin="16", ClampMax="128", UIMin="16", UIMax="128"))
     int32 TileSizePixels = 32;
 
     /** Maximum number of tiles emitted by one splat in Tiled mode. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Rendering|Tiled", meta=(ClampMin="1", ClampMax="256", UIMin="1", UIMax="256"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Tiled", meta=(ClampMin="1", ClampMax="256", UIMin="1", UIMax="256"))
     int32 MaxTilesPerSplat = 64;
 
     /** Maximum memory used by variable-length tiled key/value pairs. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Rendering|Tiled", meta=(ClampMin="16", ClampMax="2048", Units="MB"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Tiled", meta=(ClampMin="16", ClampMax="2048", Units="MB"))
     int32 TiledPairBudgetMB = 256;
 
     /** Optional deterministic remapping of normalized Progress for Sequencer and Blueprint scrubbing. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Effect")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Effects")
     TObjectPtr<UCurveFloat> ProgressCurve;
 
     /** Optional live control source shared with materials, Blueprint and Sequencer. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Effect|MPC")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Effects|MPC")
     TObjectPtr<UMaterialParameterCollection> MaterialParameterCollection;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Effect|MPC")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Effects|MPC")
     FName MPCProgressParameter = NAME_None;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Effect|MPC")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Effects|MPC")
     FName MPCTintParameter = NAME_None;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Effect|TextureMask")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Effects|Texture Mask")
     EKasumiSplatExternalMask ExternalMaskMode = EKasumiSplatExternalMask::None;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Effect|TextureMask")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Effects|Texture Mask")
     TObjectPtr<UTexture2D> EffectMaskTexture;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Effect|TextureMask")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Effects|Texture Mask")
     TObjectPtr<UVolumeTexture> EffectMaskVolume;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Effect|TextureMask")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Effects|Texture Mask")
     FVector ExternalMaskCenter = FVector::ZeroVector;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Effect|TextureMask", meta=(ClampMin="0.001", Units="cm"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Effects|Texture Mask", meta=(ClampMin="0.001", Units="cm"))
     FVector ExternalMaskExtent = FVector(100.0);
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Effect|TextureMask", meta=(ClampMin="0", ClampMax="1"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Effects|Texture Mask", meta=(ClampMin="0", ClampMax="1"))
     float ExternalMaskStrength = 1.0f;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Effect|TextureMask")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Effects|Texture Mask")
     bool bInvertExternalMask = false;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Asset")
     TObjectPtr<UKasumiSplatAsset> Asset;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Asset")
     bool bUseSyntheticFallback = true;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Asset")
     bool bRenderSplats = true;
 
     /** Maximum source points considered by the GPU visibility pass. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Performance", meta=(ClampMin="1", UIMin="1"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Performance", meta=(ClampMin="1", UIMin="1"))
     int32 MaxVisibleSplats = 750000;
 
     /** Loads and renders every source point for fixed-camera quality comparisons. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Quality")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Quality")
     bool bFullQualityReference = false;
 
     /** Stream only the nearest asset chunks into the CPU/GPU resident working set. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Streaming")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming")
     bool bEnableChunkStreaming = true;
 
     /** Hard upper bound for points retained by this component after LOD. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Streaming", meta=(ClampMin="1", UIMin="1000"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(ClampMin="1", UIMin="1000"))
     int32 MaxResidentSplats = 1000000;
 
     /** Approximate combined CPU and GPU working-set budget. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Streaming", meta=(ClampMin="16", UIMin="16", UIMax="4096", Units="MB"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(ClampMin="16", UIMin="16", UIMax="4096", Units="MB"))
     int32 StreamingMemoryBudgetMB = 256;
 
     /** Chunks beyond this distance are unloaded. Zero keeps all distances eligible. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Streaming", meta=(ClampMin="0", Units="cm"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(ClampMin="0", Units="cm"))
     float MaxStreamingDistance = 0.0f;
 
     /** Distance at which deterministic source-order LOD decimation begins. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Streaming", meta=(ClampMin="1", Units="cm"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(ClampMin="1", Units="cm"))
     float LODStartDistance = 2500.0f;
 
     /** Largest source-order LOD stride. Use powers of two for stable transitions. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Streaming", meta=(ClampMin="1", ClampMax="64"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(ClampMin="1", ClampMax="64"))
     int32 MaxLODStride = 4;
 
     /** Minimum time between camera-driven streaming decisions. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Streaming", meta=(ClampMin="0.05", ClampMax="5.0", Units="s"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(ClampMin="0.05", ClampMax="5.0", Units="s"))
     float StreamingUpdateInterval = 0.25f;
 
     /** Splats smaller than this projected radius are removed by the GPU visibility pass. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Performance", meta=(ClampMin="0.0", UIMin="0.0", UIMax="4.0"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Performance", meta=(ClampMin="0.0", UIMin="0.0", UIMax="4.0"))
     float MinProjectedRadiusPixels = 0.25f;
 
     /** Prevents near-camera splats from expanding to an unbounded screen size. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Performance", meta=(ClampMin="1.0", UIMin="32.0", UIMax="2048.0"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Performance", meta=(ClampMin="1.0", UIMin="32.0", UIMax="2048.0"))
     float MaxProjectedRadiusPixels = 1024.0f;
 
     /** Screen-space variance added to each Gaussian to reduce sub-pixel flicker. Zero disables filtering. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Rendering", meta=(ClampMin="0.0", ClampMax="4.0", UIMin="0.0", UIMax="1.0"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Quality", meta=(ClampMin="0.0", ClampMax="4.0", UIMin="0.0", UIMax="1.0"))
     float AntialiasingFilterVariance = 0.3f;
 
     /** Selects legacy filtering, area-preserving filtering, or an unfiltered reference. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Rendering")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Quality")
     EKasumiSplatAntialiasingMode AntialiasingMode = EKasumiSplatAntialiasingMode::AreaCompensated;
 
     /** Cross-fades resident-set changes to suppress visible streaming and LOD pops. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Rendering|Temporal")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Temporal")
     bool bTemporalStabilization = true;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Rendering|Temporal", meta=(ClampMin="0.0", ClampMax="2.0", Units="s"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Temporal", meta=(ClampMin="0.0", ClampMax="2.0", Units="s"))
     float TemporalTransitionDuration = 0.15f;
 
     /** Limits needle-like source splats. The longest principal axis may be this many times the middle axis. Zero disables the limit. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Rendering", meta=(ClampMin="0.0", UIMin="0.0", UIMax="256.0"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Quality", meta=(ClampMin="0.0", UIMin="0.0", UIMax="256.0"))
     float MaxAnisotropy = 32.0f;
 
     /** Limits an individual principal-axis sigma before component scaling. Zero disables the limit. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Rendering", meta=(ClampMin="0.0", UIMin="0.0", UIMax="1000.0", Units="cm"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Quality", meta=(ClampMin="0.0", UIMin="0.0", UIMax="1000.0", Units="cm"))
     float MaxSplatSigmaCentimeters = 100.0f;
 
     /** Small device-depth tolerance used when splats meet opaque geometry. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Rendering", meta=(ClampMin="0.0", ClampMax="0.01", UIMin="0.0", UIMax="0.001"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering", meta=(ClampMin="0.0", ClampMax="0.01", UIMin="0.0", UIMax="0.001"))
     float SceneDepthBias = 0.00001f;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Rendering")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering")
     bool bUseSceneDepth = true;
 
     /** Center-depth pre-cull is limited to small splats to avoid removing large, partially visible ellipses. Zero disables it. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Rendering", meta=(ClampMin="0.0", ClampMax="64.0"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering", meta=(ClampMin="0.0", ClampMax="64.0"))
     float DepthPreCullMaxRadiusPixels = 8.0f;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Debug")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Debug")
     bool bDrawDebugBounds = false;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="KasumiSplat|Debug")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Debug")
     bool bDrawDebugChunks = false;
 
     UFUNCTION(BlueprintCallable, CallInEditor, Category="KasumiSplat")

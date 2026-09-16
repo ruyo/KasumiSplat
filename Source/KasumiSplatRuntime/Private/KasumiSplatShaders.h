@@ -18,6 +18,7 @@ public:
         SHADER_PARAMETER(FMatrix44f, LocalToWorld)
         SHADER_PARAMETER(FMatrix44f, WorldToClip)
         SHADER_PARAMETER(FVector2f, ViewSize)
+        SHADER_PARAMETER(FVector4f, Tint)
         SHADER_PARAMETER(FVector4f, StyleValues)
         SHADER_PARAMETER(FVector4f, AppearanceValues)
         SHADER_PARAMETER(float, OpacityDensity)
