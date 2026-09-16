@@ -7,6 +7,22 @@
 
 class UAssetImportData;
 
+/** Compact, preprojected point used only by the Content Browser thumbnail renderer. */
+USTRUCT()
+struct KASUMISPLATRUNTIME_API FKasumiSplatThumbnailPoint
+{
+    GENERATED_BODY()
+
+    UPROPERTY()
+    FVector2f Position = FVector2f::ZeroVector;
+
+    UPROPERTY()
+    float Radius = 0.005f;
+
+    UPROPERTY()
+    FColor Color = FColor::White;
+};
+
 /** Imported, immutable source data for a Gaussian splat capture. */
 UCLASS(BlueprintType)
 class KASUMISPLATRUNTIME_API UKasumiSplatAsset : public UObject
@@ -16,7 +32,7 @@ class KASUMISPLATRUNTIME_API UKasumiSplatAsset : public UObject
 public:
     UKasumiSplatAsset();
 
-    static constexpr int32 CurrentDataVersion = 6;
+    static constexpr int32 CurrentDataVersion = 7;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="KasumiSplat")
     int32 DataVersion = CurrentDataVersion;
@@ -80,6 +96,10 @@ public:
     int32 HigherOrderSHBulkDataVersion = 0;
 
 #if WITH_EDITORONLY_DATA
+    /** Lightweight preview generated during import without retaining or rereading the point BulkData. */
+    UPROPERTY()
+    TArray<FKasumiSplatThumbnailPoint> ThumbnailPoints;
+
     UPROPERTY(VisibleAnywhere, Instanced, Category="ImportSettings")
     TObjectPtr<UAssetImportData> AssetImportData;
 #endif

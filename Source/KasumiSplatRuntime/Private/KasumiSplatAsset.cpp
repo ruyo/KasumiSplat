@@ -21,6 +21,79 @@ namespace
 
     constexpr int32 KasumiChunkPointCount = 65536;
 
+#if WITH_EDITORONLY_DATA
+    constexpr int32 KasumiThumbnailPointLimit = 2048;
+
+    void BuildThumbnailPreview(
+        const TArray<FKasumiSplatPoint>& Points,
+        TArray<FKasumiSplatThumbnailPoint>& OutPoints)
+    {
+        OutPoints.Reset();
+        if (Points.IsEmpty())
+        {
+            return;
+        }
+
+        const FVector ViewDirection = FVector(1.0, 1.0, 0.75).GetSafeNormal();
+        const FVector Right = FVector(1.0, -1.0, 0.0).GetSafeNormal();
+        const FVector Up = FVector::CrossProduct(Right, ViewDirection).GetSafeNormal();
+        double MinU = TNumericLimits<double>::Max();
+        double MaxU = TNumericLimits<double>::Lowest();
+        double MinV = TNumericLimits<double>::Max();
+        double MaxV = TNumericLimits<double>::Lowest();
+        for (const FKasumiSplatPoint& Point : Points)
+        {
+            const double U = FVector::DotProduct(Point.Position, Right);
+            const double V = FVector::DotProduct(Point.Position, Up);
+            MinU = FMath::Min(MinU, U);
+            MaxU = FMath::Max(MaxU, U);
+            MinV = FMath::Min(MinV, V);
+            MaxV = FMath::Max(MaxV, V);
+        }
+
+        const double CenterU = (MinU + MaxU) * 0.5;
+        const double CenterV = (MinV + MaxV) * 0.5;
+        const double Span = FMath::Max(FMath::Max(MaxU - MinU, MaxV - MinV), 1.0e-6);
+        const int32 PreviewCount = FMath::Min(Points.Num(), KasumiThumbnailPointLimit);
+        struct FPreviewCandidate
+        {
+            FKasumiSplatThumbnailPoint Point;
+            double Depth = 0.0;
+        };
+        TArray<FPreviewCandidate> Candidates;
+        Candidates.Reserve(PreviewCount);
+        for (int32 PreviewIndex = 0; PreviewIndex < PreviewCount; ++PreviewIndex)
+        {
+            const int32 SourceIndex = int32((int64(PreviewIndex) * Points.Num()) / PreviewCount);
+            const FKasumiSplatPoint& Source = Points[SourceIndex];
+            FPreviewCandidate& Candidate = Candidates.AddDefaulted_GetRef();
+            Candidate.Point.Position = FVector2f(
+                float(0.5 + 0.9 * (FVector::DotProduct(Source.Position, Right) - CenterU) / Span),
+                float(0.5 - 0.9 * (FVector::DotProduct(Source.Position, Up) - CenterV) / Span));
+            Candidate.Point.Radius = float(FMath::Clamp(
+                3.0 * Source.Sigma.GetAbs().GetMax() / Span,
+                0.004,
+                0.06));
+            FLinearColor PreviewColor(
+                FMath::Max(Source.Color.R, 0.0f),
+                FMath::Max(Source.Color.G, 0.0f),
+                FMath::Max(Source.Color.B, 0.0f),
+                FMath::Clamp(Source.Color.A, 0.15f, 0.9f));
+            Candidate.Point.Color = PreviewColor.ToFColorSRGB();
+            Candidate.Depth = FVector::DotProduct(Source.Position, ViewDirection);
+        }
+        Candidates.StableSort([](const FPreviewCandidate& A, const FPreviewCandidate& B)
+        {
+            return A.Depth < B.Depth;
+        });
+        OutPoints.Reserve(Candidates.Num());
+        for (FPreviewCandidate& Candidate : Candidates)
+        {
+            OutPoints.Add(MoveTemp(Candidate.Point));
+        }
+    }
+#endif
+
     uint32 ExpandMortonBits(uint32 Value)
     {
         Value &= 0x000003ff;
@@ -221,6 +294,10 @@ void UKasumiSplatAsset::SetImportedPoints(
         }
         Chunks.Last().LocalBounds += Point.Position;
     }
+
+#if WITH_EDITORONLY_DATA
+    BuildThumbnailPreview(InPoints, ThumbnailPoints);
+#endif
 
     PointBulkData.RemoveBulkData();
     PointBulkData.SetBulkDataFlags(BULKDATA_Force_NOT_InlinePayload);

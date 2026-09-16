@@ -76,6 +76,15 @@ bool FKasumiSplatPackedStorageTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("Stable ID survives packing"), Loaded[0].StableId, 123456789);
     TestTrue(TEXT("Position survives packing"), Loaded[0].Position.Equals(FVector(10, 20, 30), 1.e-5));
     TestEqual(TEXT("One chunk is generated"), Asset->Chunks.Num(), 1);
+#if WITH_EDITORONLY_DATA
+    TestEqual(TEXT("Import generates one lightweight thumbnail point"), Asset->ThumbnailPoints.Num(), 1);
+    if (Asset->ThumbnailPoints.Num() == 1)
+    {
+        TestTrue(TEXT("Thumbnail projection is normalized"),
+            Asset->ThumbnailPoints[0].Position.X >= 0.0f && Asset->ThumbnailPoints[0].Position.X <= 1.0f &&
+            Asset->ThumbnailPoints[0].Position.Y >= 0.0f && Asset->ThumbnailPoints[0].Position.Y <= 1.0f);
+    }
+#endif
     TArray<float> LoadedSH;
     TestTrue(TEXT("SH bulk data loads"), Asset->LoadHigherOrderSH(LoadedSH));
     TestEqual(TEXT("SH value count"), LoadedSH.Num(), 3);

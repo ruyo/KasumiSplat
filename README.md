@@ -7,7 +7,7 @@ KasumiSplat is a UE 5.8 Gaussian splat renderer with PLY import, streamable asse
 - `KasumiSplatRuntime`: SM6 instanced-quad renderer, GPU culling, 4096-bin, exact global radix, and tiled sorting paths, indirect draw, Scene Depth rejection, and a small-splat depth pre-cull.
 - `KasumiSplatEditor`: ASCII, binary little-endian, and binary big-endian PLY import and reimport. The parser accepts a 64-bit mapped-file size, so files above 2 GB can be parsed when their point and SH arrays fit Unreal's 32-bit `TArray` limits.
 - `KasumiSplatNiagara`: User Parameter bridge and a Data Interface for CPU Sim and GPU Sim. Resident point data is uploaded to its render-thread proxy only when the component revision changes.
-- Version 6 assets: packed point and higher-order SH `FByteBulkData`, imported SH direction basis and profile metadata, 65,536-point Morton chunks, async range reads, moment-matched Gaussian distance LOD, resident-point and memory budgets.
+- Version 7 assets: packed point and higher-order SH `FByteBulkData`, imported SH direction basis and profile metadata, 65,536-point Morton chunks, async range reads, moment-matched Gaussian distance LOD, resident-point and memory budgets, and an editor-only lightweight thumbnail preview.
 - GPU effects: legacy controls plus four ordered Displace, Tint, Opacity, Scale, or Rotate layers. Sphere and box masks, Stable ID noise, Texture2D masks, and VolumeTexture masks are supported.
 - Animation control: `Interp` style values, `UCurveFloat`, Blueprint setters, Material Parameter Collection inputs, and deterministic normalized Progress suitable for Sequencer scrubbing.
 - View-dependent spherical harmonics through degree 3.
@@ -21,13 +21,15 @@ The renderer runs at `BeforeDOF`, in HDR before depth of field, temporal upscali
 1. Drag a `.ply` file into the Content Browser.
 2. Select `Auto Detect`, `Standard 3D Gaussian Splatting`, `Luma AI`, `RGB Point Cloud (sRGB)`, or `Custom`. Auto Detect uses Luma header hints and the available Gaussian properties.
 3. Set `Units To Centimeters`; the default `100` treats one source unit as one meter.
-4. Place a `KasumiSplatActor` and assign the imported asset to its component.
-5. Disable `Use Synthetic Fallback` for imported data.
+4. Drag the imported `KasumiSplatAsset` from the Content Browser into the level. A `KasumiSplatActor` is created with the asset assigned and `Use Synthetic Fallback` disabled.
+5. Alternatively, place a `KasumiSplatActor`, assign the asset to its component, and disable `Use Synthetic Fallback` manually.
 6. Select an Appearance Preset or adjust Exposure EV, Saturation, Contrast, SH Strength, and Opacity Density. Editing any value changes the preset to Custom.
 7. Adjust Style, Effect Layers, streaming budgets, and an optional Texture2D or VolumeTexture mask.
 8. For Niagara, add a `Kasumi Splat` Data Interface, set `Source Actor`, and call `GetPointCount` or `GetPoint` in a CPU or GPU emitter.
 
 `Samples/KasumiSplatTiny.ply` and the scripts under `Tests/` recreate the small validation assets. Content assets are intentionally excluded from the plugin source package.
+
+The importer also stores a deterministic preview of at most 2,048 projected points. The Content Browser renders this preview without reading the full point BulkData. Reimport version 6 or older assets once to generate their preview; until then they use the KasumiSplat class icon.
 
 ## Design rule
 

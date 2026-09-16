@@ -3,6 +3,7 @@
 #include "KasumiSplatConfiguration.h"
 #include "GlobalShader.h"
 #include "PostProcess/PostProcessMaterialInputs.h"
+#include "SceneView.h"
 
 inline constexpr uint32 KasumiMaxEffectLayers = KasumiSplatConfig::MaxEffectLayers;
 
