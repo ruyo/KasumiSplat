@@ -81,7 +81,7 @@ void UKasumiSplatThumbnailRenderer::Draw(
     {
         FCanvasTriangleItem Points(Triangles, nullptr);
         Points.BlendMode = SE_BLEND_Translucent;
-        Canvas->DrawItem(Points);
+        //Canvas->DrawItem(Points);
     }
 #endif
 }
