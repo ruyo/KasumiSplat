@@ -1,0 +1,247 @@
+[numthreads(64, 1, 1)]
+void CullCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    const uint SampleIndex = DispatchThreadId.x;
+    if (SampleIndex >= PointCount)
+    {
+        return;
+    }
+    const uint BaseCount = SourcePointCount / PointCount;
+    const uint Remainder = SourcePointCount % PointCount;
+    const uint GroupStart = SampleIndex * BaseCount + min(SampleIndex, Remainder);
+    const uint GroupCount = BaseCount + (SampleIndex < Remainder ? 1u : 0u);
+    uint PointIndex = GroupStart;
+    float BestImportance = -3.402823466e+38;
+    float4 CenterClip = 0.0;
+    float4 Rotation = 0.0;
+    float4 SigmaAndAlpha = 0.0;
+    uint StableId = 0u;
+    float Weight = 0.0;
+    float LayerScale = 1.0;
+    float4 LayerColor = 1.0;
+    float3 TransformedLocalPosition = 0.0;
+    float3 Covariance = 0.0;
+    [loop]
+    for (uint CandidateOffset = 0u; CandidateOffset < GroupCount; ++CandidateOffset)
+    {
+        const uint CandidateIndex = GroupStart + CandidateOffset;
+        float4 CandidateCenterClip;
+        float4 CandidateRotation;
+        float4 CandidateSigmaAndAlpha;
+        uint CandidateStableId;
+        float CandidateWeight;
+        float CandidateLayerScale;
+        float4 CandidateLayerColor;
+        float3 CandidateLocalPosition;
+        LoadTransformedPoint(
+            CandidateIndex,
+            CandidateCenterClip,
+            CandidateRotation,
+            CandidateSigmaAndAlpha,
+            CandidateStableId,
+            CandidateWeight,
+            CandidateLayerScale,
+            CandidateLayerColor,
+            CandidateLocalPosition);
+        const float3 CandidateCovariance = ComputeCovariance(
+            CandidateCenterClip,
+            CandidateRotation,
+            CandidateSigmaAndAlpha,
+            CandidateWeight,
+            CandidateLayerScale).xyz;
+        const float CandidateDeterminant =
+            CandidateCovariance.x * CandidateCovariance.z - CandidateCovariance.y * CandidateCovariance.y;
+        const float2 CandidateNdc = CandidateCenterClip.xy / max(CandidateCenterClip.w, 1.0e-6);
+        const bool bCandidateProjectable = CandidateCenterClip.w > 0.01 &&
+            CandidateCenterClip.z >= 0.0 && CandidateCenterClip.z <= CandidateCenterClip.w &&
+            CandidateDeterminant > 1.0e-8 &&
+            abs(CandidateNdc.x) <= 1.25 && abs(CandidateNdc.y) <= 1.25;
+        const float CandidateAlpha = ApplyOpacityDensity(CandidateSigmaAndAlpha.w) *
+            TransitionOpacity(CandidateIndex) * max(CandidateLayerColor.a, 0.0) * max(StyleValues.y, 0.0);
+        const float Importance = bCandidateProjectable
+            ? CandidateAlpha * sqrt(max(CandidateDeterminant, 0.0))
+            : -1.0;
+        if (Importance > BestImportance ||
+            (Importance == BestImportance && CandidateStableId < StableId))
+        {
+            BestImportance = Importance;
+            PointIndex = CandidateIndex;
+            CenterClip = CandidateCenterClip;
+            Rotation = CandidateRotation;
+            SigmaAndAlpha = CandidateSigmaAndAlpha;
+            StableId = CandidateStableId;
+            Weight = CandidateWeight;
+            LayerScale = CandidateLayerScale;
+            LayerColor = CandidateLayerColor;
+            TransformedLocalPosition = CandidateLocalPosition;
+            Covariance = CandidateCovariance;
+        }
+    }
+
+    const float Determinant = Covariance.x * Covariance.z - Covariance.y * Covariance.y;
+    const float RadiusX = min(3.0 * sqrt(max(Covariance.x, 0.0)), ProjectedRadiusRange.y);
+    const float RadiusY = min(3.0 * sqrt(max(Covariance.z, 0.0)), ProjectedRadiusRange.y);
+    const float MaxRadius = max(RadiusX, RadiusY);
+    const float2 Ndc = CenterClip.xy / max(CenterClip.w, 1.0e-6);
+    const float2 NdcRadius = 2.0 * float2(RadiusX, RadiusY) / ViewSize;
+    const float DeviceZ = CenterClip.z / max(CenterClip.w, 1.0e-6);
+    const float2 RelativePixel = (Ndc * float2(0.5, -0.5) + 0.5) * ViewSize;
+    const int2 ScenePixel = int2(ViewRectMin + clamp(RelativePixel, 0.0.xx, ViewSize - 1.0.xx));
+    const float SceneDeviceZAtCenter = SceneTexturesStruct.SceneDepthTexture.Load(int3(ScenePixel, 0)).r;
+    const bool bCenterOccluded =
+        UseSceneDepth != 0u &&
+        DepthPreCullMaxRadiusPixels > 0.0 &&
+        MaxRadius <= DepthPreCullMaxRadiusPixels &&
+        SceneDeviceZAtCenter > DeviceZ + SceneDepthBias;
+    const bool bVisible =
+        CenterClip.w > 0.01 &&
+        CenterClip.z >= 0.0 && CenterClip.z <= CenterClip.w &&
+        Determinant > 1.0e-8 &&
+        MaxRadius >= ProjectedRadiusRange.x &&
+        abs(Ndc.x) <= 1.0 + NdcRadius.x &&
+        abs(Ndc.y) <= 1.0 + NdcRadius.y &&
+        !bCenterOccluded;
+
+    uint Bucket = KASUMI_INVALID_BUCKET;
+    uint ExactKey = 0xffffffffu;
+    if (bVisible)
+    {
+        const float LogDepthBucket = 1.0 - saturate(log2(max(CenterClip.w, 1.0)) / 20.0);
+        const float SortDepth = UseLogDepthSort != 0u ? LogDepthBucket : saturate(DeviceZ);
+        Bucket = min(uint(SortDepth * float(KASUMI_BUCKET_COUNT - 1u)), KASUMI_BUCKET_COUNT - 1u);
+        ExactKey = UseLogDepthSort != 0u ? ~asuint(max(CenterClip.w, 0.0)) : asuint(saturate(DeviceZ));
+        if (SortPath == 0u)
+        {
+            InterlockedAdd(RWBucketCounts[Bucket], 1u);
+        }
+        else if (SortPath == 1u || EnableTiledFallback != 0u)
+        {
+            InterlockedAdd(RWDrawIndirectArgs[1], 1u);
+        }
+        if (SortPath == 2u)
+        {
+            const int2 TileCount = int2(TileConfig.yz);
+            const float TileSize = float(TileConfig.x);
+            int2 TileMin = clamp(int2(floor((RelativePixel - float2(RadiusX, RadiusY)) / TileSize)), 0, TileCount - 1);
+            int2 TileMax = clamp(int2(floor((RelativePixel + float2(RadiusX, RadiusY)) / TileSize)), 0, TileCount - 1);
+            int2 TileSpan = TileMax - TileMin + 1;
+            const uint TileOverlapCount = uint(TileSpan.x * TileSpan.y);
+            if (TileOverlapCount <= MaxTilesPerSplat)
+            {
+                const uint DepthShift = 32u - TileDepthBits;
+                const uint DepthMask = 0xffffffffu >> DepthShift;
+                const float2 ClipWGradient = ComputeClipWGradient(
+                    CenterClip, Rotation, SigmaAndAlpha, Weight, LayerScale);
+                [loop]
+                for (int TileY = TileMin.y; TileY <= TileMax.y; ++TileY)
+                {
+                    [loop]
+                    for (int TileX = TileMin.x; TileX <= TileMax.x; ++TileX)
+                    {
+                        const uint TileIndex = uint(TileY) * TileConfig.y + uint(TileX);
+                        const float2 TileCenterPixel = (float2(TileX, TileY) + 0.5) * TileSize;
+                        const float LocalClipW = max(CenterClip.w + dot(
+                            ClipWGradient,
+                            TileCenterPixel - RelativePixel), 1.0);
+                        const float LogarithmicDepth = 1.0 - saturate(log2(LocalClipW) / 20.0);
+                        const uint QuantizedDepth = uint(LogarithmicDepth * float(DepthMask));
+                        uint PairIndex;
+                        InterlockedAdd(RWTileDrawIndirectArgs[1], 1u, PairIndex);
+                        if (PairIndex < TilePairCapacity)
+                        {
+                            RWTileKeys[PairIndex] = (TileIndex << TileDepthBits) | QuantizedDepth;
+                            RWTileValues[PairIndex] = PointIndex;
+                        }
+                        else
+                        {
+                            InterlockedAdd(RWTileOverflow[0], 1u);
+                        }
+                    }
+                }
+            }
+            else
+            {
+                InterlockedAdd(RWTileOverflow[0], 1u);
+            }
+        }
+    }
+    if (SortPath == 0u)
+    {
+        RWVisibilityBuckets[SampleIndex] = Bucket;
+        RWExactValues[SampleIndex] = PointIndex;
+    }
+    else if (SortPath == 1u || EnableTiledFallback != 0u)
+    {
+        RWExactKeys[SampleIndex] = ExactKey;
+        RWExactValues[SampleIndex] = PointIndex;
+    }
+    if (SampleIndex == 0u)
+    {
+        RWDrawIndirectArgs[0] = 6u;
+        RWTileDrawIndirectArgs[0] = 6u;
+    }
+}
+
+[numthreads(1, 1, 1)]
+void FinalizeTiledCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    const bool bOverflow = RWTileOverflow[0] != 0u || RWTileDrawIndirectArgs[1] > TilePairCapacity;
+    RWDrawIndirectArgs[0] = 6u;
+    RWDrawIndirectArgs[2] = 0u;
+    RWDrawIndirectArgs[3] = 0u;
+    RWTileDrawIndirectArgs[0] = 6u;
+    RWTileDrawIndirectArgs[2] = 0u;
+    RWTileDrawIndirectArgs[3] = 0u;
+    if (bOverflow)
+    {
+        RWTileDrawIndirectArgs[1] = 0u;
+    }
+    else
+    {
+        RWDrawIndirectArgs[1] = 0u;
+    }
+}
+
+[numthreads(1, 1, 1)]
+void PrefixCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    uint VisibleCount = 0u;
+    [loop]
+    for (uint Bucket = 0u; Bucket < KASUMI_BUCKET_COUNT; ++Bucket)
+    {
+        RWBucketOffsets[Bucket] = VisibleCount;
+        RWBucketWriteOffsets[Bucket] = VisibleCount;
+        VisibleCount += BucketCounts[Bucket];
+    }
+
+    RWDrawIndirectArgs[0] = 6u;
+    RWDrawIndirectArgs[1] = VisibleCount;
+    RWDrawIndirectArgs[2] = 0u;
+    RWDrawIndirectArgs[3] = 0u;
+}
+
+[numthreads(64, 1, 1)]
+void ScatterCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    const uint SampleIndex = DispatchThreadId.x;
+    if (SampleIndex < PointCount)
+    {
+        const uint Bucket = VisibilityBuckets[SampleIndex];
+        if (Bucket != KASUMI_INVALID_BUCKET)
+        {
+            uint OutputIndex;
+            InterlockedAdd(RWBucketWriteOffsets[Bucket], 1u, OutputIndex);
+            RWSortedIndices[OutputIndex] = ExactValues[SampleIndex];
+        }
+    }
+}
+
+struct FKasumiVertexOutput
+{
+    float4 Position : SV_POSITION;
+    noperspective float2 DeltaPixels : TEXCOORD0;
+    nointerpolation float3 Conic : TEXCOORD1;
+    nointerpolation float4 Color : COLOR0;
+    nointerpolation uint TileIndex : TEXCOORD2;
+    nointerpolation float DepthRadius : TEXCOORD3;
+};

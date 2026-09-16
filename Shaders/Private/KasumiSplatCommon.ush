@@ -1,0 +1,452 @@
+#include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/Common.ush"
+
+#define KASUMI_BUCKET_COUNT 4096u
+#define KASUMI_INVALID_BUCKET 0xffffffffu
+
+StructuredBuffer<float4> PointData;
+StructuredBuffer<float4> SHData;
+Buffer<uint> VisibilityBuckets;
+Buffer<uint> ExactValues;
+Buffer<uint> BucketCounts;
+Buffer<uint> BucketOffsets;
+Buffer<uint> VisibleIndices;
+Buffer<uint> TileKeys;
+RWBuffer<uint> RWVisibilityBuckets;
+RWBuffer<uint> RWBucketCounts;
+RWBuffer<uint> RWBucketOffsets;
+RWBuffer<uint> RWBucketWriteOffsets;
+RWBuffer<uint> RWSortedIndices;
+RWBuffer<uint> RWDrawIndirectArgs;
+RWBuffer<uint> RWTileDrawIndirectArgs;
+RWBuffer<uint> RWTileOverflow;
+RWBuffer<uint> RWExactKeys;
+RWBuffer<uint> RWExactValues;
+RWBuffer<uint> RWTileKeys;
+RWBuffer<uint> RWTileValues;
+
+float4x4 LocalToWorld;
+float4x4 WorldToClip;
+float4x4 LocalToSHDirection;
+float2 ViewSize;
+float4 Tint;
+float4 StyleValues;
+// x: exposure EV, y: saturation, z: contrast, w: higher-order SH strength
+float4 AppearanceValues;
+float OpacityDensity;
+float4 EffectTint;
+// x: target scale, y: target opacity, z: rotation degrees, w: noise amount
+float4 EffectValues;
+float4 MaskCenterRadius;
+// x: mask feather
+float2 MaskValues;
+float2 ProjectedRadiusRange;
+float AntialiasingFilterVariance;
+uint AntialiasingMode;
+float TemporalTransitionAlpha;
+float2 ShapeLimits;
+float2 ViewRectMin;
+float DepthPreCullMaxRadiusPixels;
+float MaxProjectedRadiusPixels;
+float SceneDepthBias;
+uint UseSceneDepth;
+uint Seed;
+uint PointCount;
+uint SourcePointCount;
+uint UseLogDepthSort;
+uint SortPath;
+uint EnableTiledFallback;
+uint UseTilePairs;
+uint MaxTilesPerSplat;
+uint TilePairCapacity;
+uint TileDepthBits;
+uint4 TileConfig;
+uint HigherOrderSHCoefficientsPerPoint;
+float3 ViewLocalPosition;
+float4 LayerTypeWeight[4];
+float4 LayerMaskCenterFeather[4];
+float4 LayerMaskExtentEnabled[4];
+float4 LayerTint[4];
+float4 LayerVectorSeed[4];
+uint LayerCount;
+Texture2D ExternalMaskTexture2D;
+Texture3D ExternalMaskTexture3D;
+SamplerState ExternalMaskSampler;
+float4 ExternalMaskCenterMode;
+float4 ExternalMaskExtentValues;
+
+float3 RotateByQuaternion(float3 Value, float4 Quaternion)
+{
+    return Value + 2.0 * cross(Quaternion.xyz, cross(Quaternion.xyz, Value) + Quaternion.w * Value);
+}
+
+uint HashUint(uint Value)
+{
+    Value ^= Value >> 16;
+    Value *= 0x7feb352d;
+    Value ^= Value >> 15;
+    Value *= 0x846ca68b;
+    Value ^= Value >> 16;
+    return Value;
+}
+
+float HashSigned(uint Value)
+{
+    return (float(HashUint(Value) & 0x00ffffffu) / 8388607.5) - 1.0;
+}
+
+float3 StableDirection(uint StableId)
+{
+    const uint Base = StableId * 196613u + Seed * 747796405u;
+    float3 Direction = float3(
+        HashSigned(Base + 0x68bc21ebu),
+        HashSigned(Base + 0x02e5be93u),
+        HashSigned(Base + 0x967a889bu));
+    return normalize(Direction + float3(1.0e-5, 0.0, 0.0));
+}
+
+float TransitionOpacity(uint PointIndex)
+{
+    const float TransitionClass = PointData[PointIndex * 4u + 3u].w;
+    if (TransitionClass < 0.5) return 1.0;
+    if (TransitionClass < 1.5) return saturate(TemporalTransitionAlpha);
+    return 1.0 - saturate(TemporalTransitionAlpha);
+}
+
+float ExternalMaskWeight(float3 LocalPosition)
+{
+    const uint Mode = uint(ExternalMaskCenterMode.w);
+    if (Mode == 0u) return 1.0;
+    const float3 UVW = (LocalPosition - ExternalMaskCenterMode.xyz) / max(ExternalMaskExtentValues.xyz * 2.0, 1.0e-4) + 0.5;
+    float Value = Mode == 1u
+        ? ExternalMaskTexture2D.SampleLevel(ExternalMaskSampler, UVW.xy, 0.0).r
+        : ExternalMaskTexture3D.SampleLevel(ExternalMaskSampler, UVW, 0.0).r;
+    const float SignedStrength = ExternalMaskExtentValues.w;
+    if (SignedStrength < 0.0) Value = 1.0 - Value;
+    return lerp(1.0, saturate(Value), saturate(abs(SignedStrength)));
+}
+
+float LoadSHValue(uint PointIndex, uint FlatCoefficientIndex)
+{
+    const uint FlatIndex = PointIndex * 48u + FlatCoefficientIndex;
+    return SHData[FlatIndex / 4u][FlatIndex % 4u];
+}
+
+float ApplyOpacityDensity(float Alpha)
+{
+    return 1.0 - pow(max(1.0 - saturate(Alpha), 1.0e-6), max(OpacityDensity, 0.0));
+}
+
+float3 ApplyAppearanceColor(float3 Color)
+{
+    Color *= exp2(AppearanceValues.x);
+    const float Luminance = dot(Color, float3(0.2126, 0.7152, 0.0722));
+    Color = lerp(Luminance.xxx, Color, AppearanceValues.y);
+    Color = (Color - 0.18.xxx) * AppearanceValues.z + 0.18.xxx;
+    return max(Color, 0.0.xxx);
+}
+
+float3 EvaluateHigherOrderSH(uint PointIndex, float3 SourceColor, float3 Direction)
+{
+    if (HigherOrderSHCoefficientsPerPoint == 0u || (HigherOrderSHCoefficientsPerPoint % 3u) != 0u)
+    {
+        return SourceColor;
+    }
+
+    const uint CoefficientsPerChannel = min(HigherOrderSHCoefficientsPerPoint / 3u, 15u);
+    const float x = Direction.x;
+    const float y = Direction.y;
+    const float z = Direction.z;
+    const float xx = x * x;
+    const float yy = y * y;
+    const float zz = z * z;
+    float Basis[15];
+    Basis[0] = -0.4886025119 * y;
+    Basis[1] =  0.4886025119 * z;
+    Basis[2] = -0.4886025119 * x;
+    Basis[3] =  1.0925484306 * x * y;
+    Basis[4] = -1.0925484306 * y * z;
+    Basis[5] =  0.3153915653 * (2.0 * zz - xx - yy);
+    Basis[6] = -1.0925484306 * x * z;
+    Basis[7] =  0.5462742153 * (xx - yy);
+    Basis[8] = -0.5900435899 * y * (3.0 * xx - yy);
+    Basis[9] =  2.8906114426 * x * y * z;
+    Basis[10] = -0.4570457995 * y * (4.0 * zz - xx - yy);
+    Basis[11] =  0.3731763326 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy);
+    Basis[12] = -0.4570457995 * x * (4.0 * zz - xx - yy);
+    Basis[13] =  1.4453057213 * z * (xx - yy);
+    Basis[14] = -0.5900435899 * x * (xx - 3.0 * yy);
+
+    float3 HigherOrderColor = 0.0.xxx;
+    [loop]
+    for (uint Coefficient = 0u; Coefficient < CoefficientsPerChannel; ++Coefficient)
+    {
+        const float Weight = Basis[Coefficient];
+        HigherOrderColor.r += Weight * LoadSHValue(PointIndex, Coefficient);
+        HigherOrderColor.g += Weight * LoadSHValue(PointIndex, CoefficientsPerChannel + Coefficient);
+        HigherOrderColor.b += Weight * LoadSHValue(PointIndex, CoefficientsPerChannel * 2u + Coefficient);
+    }
+    return max(SourceColor + HigherOrderColor * AppearanceValues.w, 0.0.xxx);
+}
+
+float EffectWeight(float3 LocalPosition, uint StableId)
+{
+    float Mask = 1.0;
+    if (MaskCenterRadius.w > 0.0)
+    {
+        const float Feather = max(MaskValues.x, 1.0e-4);
+        const float Distance = length(LocalPosition - MaskCenterRadius.xyz);
+        Mask = 1.0 - smoothstep(max(MaskCenterRadius.w - Feather, 0.0), MaskCenterRadius.w, Distance);
+    }
+    const float StableNoise = 0.5 + 0.5 * HashSigned(StableId * 2246822519u + Seed);
+    const float NoiseMask = lerp(1.0, StableNoise, EffectValues.w);
+    return saturate(StyleValues.z * Mask * NoiseMask * ExternalMaskWeight(LocalPosition));
+}
+
+float LayerMaskWeight(uint LayerIndex, float3 LocalPosition)
+{
+    const float Shape = LayerTypeWeight[LayerIndex].z;
+    const float3 Center = LayerMaskCenterFeather[LayerIndex].xyz;
+    const float Feather = max(LayerMaskCenterFeather[LayerIndex].w, 1.0e-4);
+    const float3 Extent = max(LayerMaskExtentEnabled[LayerIndex].xyz, 0.0);
+    if (Shape < 0.5) return 1.0;
+    if (Shape < 1.5)
+    {
+        const float Radius = Extent.x;
+        return 1.0 - smoothstep(max(Radius - Feather, 0.0), max(Radius, 1.0e-4), length(LocalPosition - Center));
+    }
+    const float3 Q = abs(LocalPosition - Center) - Extent;
+    const float SignedDistance = length(max(Q, 0.0)) + min(max(Q.x, max(Q.y, Q.z)), 0.0);
+    return 1.0 - smoothstep(0.0, Feather, SignedDistance);
+}
+
+float3 LayerStableDirection(uint StableId, uint LayerIndex)
+{
+    const uint LayerSeed = uint(abs(LayerVectorSeed[LayerIndex].w));
+    const uint Base = StableId * 196613u + LayerSeed * 747796405u;
+    return normalize(float3(
+        HashSigned(Base + 0x68bc21ebu),
+        HashSigned(Base + 0x02e5be93u),
+        HashSigned(Base + 0x967a889bu)) + float3(1.0e-5, 0.0, 0.0));
+}
+
+void ApplyEffectLayers(
+    uint StableId,
+    inout float3 LocalPosition,
+    out float LayerScale,
+    out float4 LayerColor)
+{
+    LayerScale = 1.0;
+    LayerColor = 1.0;
+    [loop]
+    for (uint LayerIndex = 0u; LayerIndex < min(LayerCount, 4u); ++LayerIndex)
+    {
+        if (LayerMaskExtentEnabled[LayerIndex].w < 0.5) continue;
+        const float Type = LayerTypeWeight[LayerIndex].x;
+        const float Weight = saturate(LayerTypeWeight[LayerIndex].y * StyleValues.z * LayerMaskWeight(LayerIndex, LocalPosition) * ExternalMaskWeight(LocalPosition));
+        const float Scalar = LayerTypeWeight[LayerIndex].w;
+        if (Type < 0.5)
+        {
+            float3 Direction = LayerVectorSeed[LayerIndex].xyz;
+            Direction = dot(Direction, Direction) > 1.0e-8 ? normalize(Direction) : LayerStableDirection(StableId, LayerIndex);
+            LocalPosition += Direction * Scalar * Weight;
+        }
+        else if (Type < 1.5)
+        {
+            LayerColor *= lerp(1.0.xxxx, LayerTint[LayerIndex], Weight);
+        }
+        else if (Type < 2.5)
+        {
+            LayerColor.a *= lerp(1.0, Scalar, Weight);
+        }
+        else if (Type < 3.5)
+        {
+            LayerScale *= lerp(1.0, Scalar, Weight);
+        }
+        else
+        {
+            const float Angle = radians(Scalar) * Weight;
+            const float2 Relative = LocalPosition.xy - LayerMaskCenterFeather[LayerIndex].xy;
+            float Sine;
+            float Cosine;
+            sincos(Angle, Sine, Cosine);
+            LocalPosition.xy = LayerMaskCenterFeather[LayerIndex].xy + float2(
+                Relative.x * Cosine - Relative.y * Sine,
+                Relative.x * Sine + Relative.y * Cosine);
+        }
+    }
+}
+
+void LoadTransformedPoint(
+    uint PointIndex,
+    out float4 CenterClip,
+    out float4 Rotation,
+    out float4 SigmaAndAlpha,
+    out uint StableId,
+    out float Weight,
+    out float LayerScale,
+    out float4 LayerColor,
+    out float3 TransformedLocalPosition)
+{
+    const float4 PositionAndId = PointData[PointIndex * 4u + 0u];
+    Rotation = normalize(PointData[PointIndex * 4u + 1u]);
+    SigmaAndAlpha = PointData[PointIndex * 4u + 2u];
+    StableId = asuint(PositionAndId.w);
+
+    float3 LocalPosition = PositionAndId.xyz;
+    Weight = EffectWeight(LocalPosition, StableId);
+    const float Angle = radians(EffectValues.z) * Weight;
+    const float2 Relative = LocalPosition.xy - MaskCenterRadius.xy;
+    const float SinAngle = sin(Angle);
+    const float CosAngle = cos(Angle);
+    LocalPosition.xy = MaskCenterRadius.xy + float2(
+        Relative.x * CosAngle - Relative.y * SinAngle,
+        Relative.x * SinAngle + Relative.y * CosAngle);
+    LocalPosition += StableDirection(StableId) * StyleValues.w * Weight;
+    ApplyEffectLayers(StableId, LocalPosition, LayerScale, LayerColor);
+    TransformedLocalPosition = LocalPosition;
+    const float4 WorldPosition = mul(float4(LocalPosition, 1.0), LocalToWorld);
+    CenterClip = mul(WorldPosition, WorldToClip);
+}
+
+float3 ComputeAxisSigma(float4 SigmaAndAlpha, float Weight, float LayerScale)
+{
+    const float EffectScale = lerp(1.0, EffectValues.x, Weight);
+    float3 AxisSigma = max(SigmaAndAlpha.xyz, 0.001.xxx) * StyleValues.x * EffectScale * LayerScale;
+    if (ShapeLimits.y > 0.0)
+    {
+        AxisSigma = min(AxisSigma, ShapeLimits.y.xxx);
+    }
+    if (ShapeLimits.x >= 1.0)
+    {
+        const float SmallestSigma = min(AxisSigma.x, min(AxisSigma.y, AxisSigma.z));
+        const float LargestSigma = max(AxisSigma.x, max(AxisSigma.y, AxisSigma.z));
+        const float MiddleSigma = AxisSigma.x + AxisSigma.y + AxisSigma.z - SmallestSigma - LargestSigma;
+        const float MaximumAllowed = max(MiddleSigma * ShapeLimits.x, 0.001);
+        AxisSigma = min(AxisSigma, MaximumAllowed.xxx);
+    }
+    return AxisSigma;
+}
+
+float4 ComputeCovariance(float4 CenterClip, float4 Rotation, float4 SigmaAndAlpha, float Weight, float LayerScale)
+{
+    float CovXX = 0.0;
+    float CovXY = 0.0;
+    float CovYY = 0.0;
+    const float3 AxisSigma = ComputeAxisSigma(SigmaAndAlpha, Weight, LayerScale);
+    [loop]
+    for (uint AxisIndex = 0u; AxisIndex < 3u; ++AxisIndex)
+    {
+        float3 Axis = 0.0;
+        Axis[AxisIndex] = AxisSigma[AxisIndex];
+        Axis = RotateByQuaternion(Axis, Rotation);
+        const float4 WorldAxis = mul(float4(Axis, 0.0), LocalToWorld);
+        const float4 ClipAxis = mul(WorldAxis, WorldToClip);
+        const float InvW2 = rcp(max(CenterClip.w * CenterClip.w, 1.0e-6));
+        const float Dx = 0.5 * ViewSize.x *
+            (ClipAxis.x * CenterClip.w - CenterClip.x * ClipAxis.w) * InvW2;
+        const float Dy = -0.5 * ViewSize.y *
+            (ClipAxis.y * CenterClip.w - CenterClip.y * ClipAxis.w) * InvW2;
+        CovXX += Dx * Dx;
+        CovXY += Dx * Dy;
+        CovYY += Dy * Dy;
+    }
+    const float OriginalDeterminant = max(CovXX * CovYY - CovXY * CovXY, 1.0e-12);
+    const float FilterVariance = AntialiasingMode == 0u ? 0.0 : max(AntialiasingFilterVariance, 0.0);
+    CovXX += FilterVariance;
+    CovYY += FilterVariance;
+    const float FilteredDeterminant = max(CovXX * CovYY - CovXY * CovXY, 1.0e-12);
+    const float OpacityCompensation = AntialiasingMode == 2u && FilterVariance > 0.0
+        ? saturate(sqrt(OriginalDeterminant / FilteredDeterminant))
+        : 1.0;
+    return float4(CovXX, CovXY, CovYY, OpacityCompensation);
+}
+
+// Linearized device-depth change per screen pixel. This lets tiled sorting evaluate
+// an oriented Gaussian at the tile ray instead of reusing one center-depth order.
+float2 ComputeDeviceDepthGradient(float4 CenterClip, float4 Rotation, float4 SigmaAndAlpha, float Weight, float LayerScale)
+{
+    float CovXX = 0.0;
+    float CovXY = 0.0;
+    float CovYY = 0.0;
+    float CovXZ = 0.0;
+    float CovYZ = 0.0;
+    const float3 AxisSigma = ComputeAxisSigma(SigmaAndAlpha, Weight, LayerScale);
+    const float InvW2 = rcp(max(CenterClip.w * CenterClip.w, 1.0e-6));
+    [unroll]
+    for (uint AxisIndex = 0u; AxisIndex < 3u; ++AxisIndex)
+    {
+        float3 Axis = 0.0;
+        Axis[AxisIndex] = AxisSigma[AxisIndex];
+        const float4 ClipAxis = mul(mul(float4(RotateByQuaternion(Axis, Rotation), 0.0), LocalToWorld), WorldToClip);
+        const float Dx = 0.5 * ViewSize.x *
+            (ClipAxis.x * CenterClip.w - CenterClip.x * ClipAxis.w) * InvW2;
+        const float Dy = -0.5 * ViewSize.y *
+            (ClipAxis.y * CenterClip.w - CenterClip.y * ClipAxis.w) * InvW2;
+        const float Dz = (ClipAxis.z * CenterClip.w - CenterClip.z * ClipAxis.w) * InvW2;
+        CovXX += Dx * Dx;
+        CovXY += Dx * Dy;
+        CovYY += Dy * Dy;
+        CovXZ += Dx * Dz;
+        CovYZ += Dy * Dz;
+    }
+    const float FilterVariance = AntialiasingMode == 0u ? 0.0 : max(AntialiasingFilterVariance, 0.0);
+    CovXX += FilterVariance;
+    CovYY += FilterVariance;
+    const float InverseDeterminant = rcp(max(CovXX * CovYY - CovXY * CovXY, 1.0e-8));
+    return float2(
+        CovYY * CovXZ - CovXY * CovYZ,
+        CovXX * CovYZ - CovXY * CovXZ) * InverseDeterminant;
+}
+
+// View-space distance change per screen pixel for high precision logarithmic tiled depth keys.
+float2 ComputeClipWGradient(float4 CenterClip, float4 Rotation, float4 SigmaAndAlpha, float Weight, float LayerScale)
+{
+    float CovXX = 0.0;
+    float CovXY = 0.0;
+    float CovYY = 0.0;
+    float CovXW = 0.0;
+    float CovYW = 0.0;
+    const float3 AxisSigma = ComputeAxisSigma(SigmaAndAlpha, Weight, LayerScale);
+    const float InvW2 = rcp(max(CenterClip.w * CenterClip.w, 1.0e-6));
+    [unroll]
+    for (uint AxisIndex = 0u; AxisIndex < 3u; ++AxisIndex)
+    {
+        float3 Axis = 0.0;
+        Axis[AxisIndex] = AxisSigma[AxisIndex];
+        const float4 ClipAxis = mul(mul(float4(RotateByQuaternion(Axis, Rotation), 0.0), LocalToWorld), WorldToClip);
+        const float Dx = 0.5 * ViewSize.x *
+            (ClipAxis.x * CenterClip.w - CenterClip.x * ClipAxis.w) * InvW2;
+        const float Dy = -0.5 * ViewSize.y *
+            (ClipAxis.y * CenterClip.w - CenterClip.y * ClipAxis.w) * InvW2;
+        CovXX += Dx * Dx;
+        CovXY += Dx * Dy;
+        CovYY += Dy * Dy;
+        CovXW += Dx * ClipAxis.w;
+        CovYW += Dy * ClipAxis.w;
+    }
+    const float FilterVariance = AntialiasingMode == 0u ? 0.0 : max(AntialiasingFilterVariance, 0.0);
+    CovXX += FilterVariance;
+    CovYY += FilterVariance;
+    const float InverseDeterminant = rcp(max(CovXX * CovYY - CovXY * CovXY, 1.0e-8));
+    return float2(
+        CovYY * CovXW - CovXY * CovYW,
+        CovXX * CovYW - CovXY * CovXW) * InverseDeterminant;
+}
+
+float ComputeDeviceDepthRadius(float4 CenterClip, float4 Rotation, float4 SigmaAndAlpha, float Weight, float LayerScale)
+{
+    const float3 AxisSigma = ComputeAxisSigma(SigmaAndAlpha, Weight, LayerScale);
+    const float InvW2 = rcp(max(CenterClip.w * CenterClip.w, 1.0e-6));
+    float DepthVariance = 0.0;
+    [unroll]
+    for (uint AxisIndex = 0u; AxisIndex < 3u; ++AxisIndex)
+    {
+        float3 Axis = 0.0;
+        Axis[AxisIndex] = AxisSigma[AxisIndex];
+        const float4 ClipAxis = mul(mul(float4(RotateByQuaternion(Axis, Rotation), 0.0), LocalToWorld), WorldToClip);
+        const float Dz = (ClipAxis.z * CenterClip.w - CenterClip.z * ClipAxis.w) * InvW2;
+        DepthVariance += Dz * Dz;
+    }
+    return min(3.0 * sqrt(max(DepthVariance, 0.0)), 0.05);
+}

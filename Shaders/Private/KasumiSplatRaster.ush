@@ -1,0 +1,88 @@
+float2 QuadCorner(uint VertexId)
+{
+    if (VertexId == 0u) return float2(-1.0, -1.0);
+    if (VertexId == 1u) return float2( 1.0, -1.0);
+    if (VertexId == 2u) return float2(-1.0,  1.0);
+    if (VertexId == 3u) return float2(-1.0,  1.0);
+    if (VertexId == 4u) return float2( 1.0, -1.0);
+    return float2(1.0, 1.0);
+}
+
+FKasumiVertexOutput MainVS(uint VertexId : SV_VertexID, uint InstanceId : SV_InstanceID)
+{
+    FKasumiVertexOutput Output;
+    const uint PointIndex = VisibleIndices[InstanceId];
+    Output.TileIndex = UseTilePairs != 0u ? TileKeys[InstanceId] >> TileDepthBits : 0xffffffffu;
+    float4 SourceColor = PointData[PointIndex * 4u + 3u];
+    float4 CenterClip;
+    float4 Rotation;
+    float4 SigmaAndAlpha;
+    uint StableId;
+    float Weight;
+    float LayerScale;
+    float4 LayerColor;
+    float3 TransformedLocalPosition;
+    LoadTransformedPoint(PointIndex, CenterClip, Rotation, SigmaAndAlpha, StableId, Weight, LayerScale, LayerColor, TransformedLocalPosition);
+    SourceColor.rgb = ApplyAppearanceColor(EvaluateHigherOrderSH(
+        PointIndex,
+        SourceColor.rgb,
+        normalize(mul(
+            float4(normalize(TransformedLocalPosition - ViewLocalPosition + float3(1.0e-6, 0.0, 0.0)), 0.0),
+            LocalToSHDirection).xyz)));
+    const float4 FilteredCovariance = ComputeCovariance(CenterClip, Rotation, SigmaAndAlpha, Weight, LayerScale);
+    const float3 Covariance = FilteredCovariance.xyz;
+    Output.DepthRadius = ComputeDeviceDepthRadius(CenterClip, Rotation, SigmaAndAlpha, Weight, LayerScale);
+    const float Determinant = Covariance.x * Covariance.z - Covariance.y * Covariance.y;
+    const float SafeDeterminant = max(Determinant, 1.0e-8);
+    const float RadiusX = min(3.0 * sqrt(max(Covariance.x, 0.0)), MaxProjectedRadiusPixels);
+    const float RadiusY = min(3.0 * sqrt(max(Covariance.z, 0.0)), MaxProjectedRadiusPixels);
+    const float2 Corner = QuadCorner(VertexId);
+    const float2 DeltaPixels = Corner * float2(RadiusX, RadiusY);
+
+    CenterClip.xy += float2(
+        2.0 * DeltaPixels.x / ViewSize.x,
+        -2.0 * DeltaPixels.y / ViewSize.y) * CenterClip.w;
+    Output.Position = CenterClip;
+    Output.DeltaPixels = DeltaPixels;
+    Output.Conic = float3(Covariance.z, -Covariance.y, Covariance.x) / SafeDeterminant;
+    const float3 EffectColor = lerp(1.0.xxx, EffectTint.rgb, Weight);
+    const float EffectAlpha = lerp(1.0, EffectTint.a, Weight);
+    const float EffectOpacity = lerp(1.0, EffectValues.y, Weight);
+    Output.Color = float4(
+        SourceColor.rgb * Tint.rgb * EffectColor * LayerColor.rgb * View.PreExposure,
+        ApplyOpacityDensity(SigmaAndAlpha.w) * TransitionOpacity(PointIndex) * StyleValues.y * Tint.a *
+            EffectAlpha * EffectOpacity * LayerColor.a * FilteredCovariance.w);
+    return Output;
+}
+
+float4 MainPS(FKasumiVertexOutput Input) : SV_Target0
+{
+    const uint2 PixelCoord = uint2(Input.Position.xy);
+    if (UseTilePairs != 0u && Input.TileIndex != 0xffffffffu)
+    {
+        const uint2 RelativePixelCoord = PixelCoord - uint2(ViewRectMin);
+        const uint2 PixelTile = RelativePixelCoord / TileConfig.x;
+        if (PixelTile.y * TileConfig.y + PixelTile.x != Input.TileIndex)
+        {
+            discard;
+        }
+    }
+    const float SceneDeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(PixelCoord, 0)).r;
+    if (UseSceneDepth != 0u && SceneDeviceZ > Input.Position.z + SceneDepthBias + Input.DepthRadius)
+    {
+        discard;
+    }
+
+    const float2 Delta = Input.DeltaPixels;
+    const float Power = -0.5 * (
+        Input.Conic.x * Delta.x * Delta.x +
+        2.0 * Input.Conic.y * Delta.x * Delta.y +
+        Input.Conic.z * Delta.y * Delta.y);
+    if (Power > 0.0 || Power < -4.5)
+    {
+        discard;
+    }
+
+    const float Alpha = min(0.99, saturate(Input.Color.a) * exp(Power));
+    return float4(Input.Color.rgb * Alpha, Alpha);
+}

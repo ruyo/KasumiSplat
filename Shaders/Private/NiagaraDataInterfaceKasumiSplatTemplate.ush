@@ -1,0 +1,36 @@
+Buffer<float4> {ParameterName}_PointData;
+float4x4 {ParameterName}_LocalToWorld;
+int {ParameterName}_PointCount;
+
+void GetPointCount_{ParameterName}(out int Out_Count)
+{
+    Out_Count = {ParameterName}_PointCount;
+}
+
+void GetPoint_{ParameterName}(
+    int In_Index,
+    out float3 Out_Position,
+    out float4 Out_Color,
+    out float3 Out_Sigma,
+    out int Out_StableID,
+    out bool Out_Valid)
+{
+    Out_Valid = In_Index >= 0 && In_Index < {ParameterName}_PointCount;
+    if (Out_Valid)
+    {
+        float4 PositionAndId = {ParameterName}_PointData[In_Index * 3 + 0];
+        float4 SigmaAndAlpha = {ParameterName}_PointData[In_Index * 3 + 1];
+        float4 Color = {ParameterName}_PointData[In_Index * 3 + 2];
+        Out_Position = mul(float4(PositionAndId.xyz, 1.0), {ParameterName}_LocalToWorld).xyz;
+        Out_Color = float4(Color.rgb, SigmaAndAlpha.w);
+        Out_Sigma = SigmaAndAlpha.xyz;
+        Out_StableID = asint(PositionAndId.w);
+    }
+    else
+    {
+        Out_Position = 0.0;
+        Out_Color = 0.0;
+        Out_Sigma = 0.0;
+        Out_StableID = -1;
+    }
+}

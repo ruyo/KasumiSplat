@@ -1,0 +1,38 @@
+{
+  "FileVersion": 3,
+  "Version": 3,
+  "VersionName": "0.3.0-beta",
+  "FriendlyName": "KasumiSplat",
+  "Description": "Gaussian splat rendering, PLY import, streaming, effects and Niagara integration for UE 5.8.",
+  "Category": "Rendering",
+  "CreatedBy": "ruyo",
+  "CreatedByURL": "https://github.com/ruyo",
+  "DocsURL": "https://github.com/ruyo/kasumiSplat",
+  "SupportURL": "https://github.com/ruyo/kasumiSplat/issues",
+  "CanContainContent": true,
+  "EnabledByDefault": false,
+  "IsBetaVersion": true,
+  "Modules": [
+    {
+      "Name": "KasumiSplatRuntime",
+      "Type": "Runtime",
+      "LoadingPhase": "PostConfigInit"
+    },
+    {
+      "Name": "KasumiSplatNiagara",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    },
+    {
+      "Name": "KasumiSplatEditor",
+      "Type": "Editor",
+      "LoadingPhase": "Default"
+    }
+  ],
+  "Plugins": [
+    {
+      "Name": "Niagara",
+      "Enabled": true
+    }
+  ]
+}
