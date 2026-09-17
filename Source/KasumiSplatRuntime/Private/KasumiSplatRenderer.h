@@ -17,6 +17,9 @@ struct FKasumiSplatPacket
     TSharedPtr<const TArray<uint8>, ESPMode::ThreadSafe> TransitionClasses;
     uint32 HigherOrderSHCoefficientsPerPoint = 0;
     float TemporalTransitionAlpha = 1.0f;
+    EKasumiSplatVelocityMode VelocityMode = EKasumiSplatVelocityMode::ActorAndCamera;
+    uint64 FrameNumber = 0;
+    bool bResetVelocityHistory = true;
     FMatrix44f LocalToSHDirection = FMatrix44f::Identity;
     FKasumiSplatStyle Style;
     FKasumiSplatAppearance Appearance;
@@ -25,6 +28,7 @@ struct FKasumiSplatPacket
     uint32 TileSizePixels = 32;
     uint32 MaxTilesPerSplat = 64;
     uint32 TiledPairBudgetMB = 256;
+    EKasumiSplatTiledFallbackMode TiledFallbackMode = EKasumiSplatTiledFallbackMode::SameFrame;
     uint32 MaxVisibleSplats = 750000;
     float MinProjectedRadiusPixels = 0.25f;
     float MaxProjectedRadiusPixels = 1024.0f;

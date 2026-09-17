@@ -2,12 +2,15 @@
 #include "KasumiSplatRenderResources.h"
 #include "KasumiSplatShaders.h"
 #include "KasumiSplatSortPolicy.h"
+#include "EngineModule.h"
 #include "GlobalShader.h"
 #include "GPUSort.h"
+#include "FXRenderingUtils.h"
 #include "PipelineStateCache.h"
 #include "PostProcess/PostProcessMaterialInputs.h"
 #include "RenderGraphUtils.h"
 #include "RenderResource.h"
+#include "RendererInterface.h"
 #include "RenderingThread.h"
 #include "RHIStaticStates.h"
 #include "SceneInterface.h"
@@ -20,6 +23,8 @@ DEFINE_LOG_CATEGORY_STATIC(LogKasumiSplatRenderer, Log, All);
 
 namespace
 {
+    constexpr uint32 KasumiDelayedFallbackHoldFrames = 60u;
+
     const TCHAR* GetSortModeName(EKasumiSplatSortMode Mode)
     {
         switch (Mode)
@@ -60,6 +65,13 @@ namespace
 BEGIN_SHADER_PARAMETER_STRUCT(FKasumiSplatDrawParameters, )
     SHADER_PARAMETER_STRUCT_INCLUDE(FKasumiSplatInstanceVS::FParameters, VS)
     SHADER_PARAMETER_STRUCT_INCLUDE(FKasumiSplatInstancePS::FParameters, PS)
+    RDG_BUFFER_ACCESS(IndirectArgs, ERHIAccess::IndirectArgs)
+    RENDER_TARGET_BINDING_SLOTS()
+END_SHADER_PARAMETER_STRUCT()
+
+BEGIN_SHADER_PARAMETER_STRUCT(FKasumiSplatVelocityDrawParameters, )
+    SHADER_PARAMETER_STRUCT_INCLUDE(FKasumiSplatInstanceVS::FParameters, VS)
+    SHADER_PARAMETER_STRUCT_INCLUDE(FKasumiSplatVelocityPS::FParameters, PS)
     RDG_BUFFER_ACCESS(IndirectArgs, ERHIAccess::IndirectArgs)
     RENDER_TARGET_BINDING_SLOTS()
 END_SHADER_PARAMETER_STRUCT()
@@ -140,6 +152,44 @@ static void AddKasumiDrawPass(
                 CW_RGBA,
                 BO_Add, BF_One, BF_InverseSourceAlpha,
                 BO_Add, BF_One, BF_InverseSourceAlpha>::GetRHI();
+            GraphicsPSOInit.RasterizerState = TStaticRasterizerState<FM_Solid, CM_None>::GetRHI();
+            GraphicsPSOInit.DepthStencilState = TStaticDepthStencilState<false, CF_Always>::GetRHI();
+            GraphicsPSOInit.BoundShaderState.VertexDeclarationRHI = GEmptyVertexDeclaration.VertexDeclarationRHI;
+            GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShader.GetVertexShader();
+            GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
+            GraphicsPSOInit.PrimitiveType = PT_TriangleList;
+            SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
+            RHICmdList.SetViewport(
+                ViewRect.Min.X,
+                ViewRect.Min.Y,
+                0.0f,
+                ViewRect.Max.X,
+                ViewRect.Max.Y,
+                1.0f);
+            SetShaderParameters(RHICmdList, VertexShader, VertexShader.GetVertexShader(), Parameters->VS);
+            SetShaderParameters(RHICmdList, PixelShader, PixelShader.GetPixelShader(), Parameters->PS);
+            RHICmdList.SetStreamSource(0, nullptr, 0);
+            RHICmdList.DrawPrimitiveIndirect(Parameters->IndirectArgs->GetIndirectRHICallBuffer(), 0);
+        });
+}
+
+static void AddKasumiVelocityPass(
+    FRDGBuilder& GraphBuilder,
+    FKasumiSplatVelocityDrawParameters* Parameters,
+    TShaderMapRef<FKasumiSplatInstanceVS> VertexShader,
+    TShaderMapRef<FKasumiSplatVelocityPS> PixelShader,
+    const FIntRect& ViewRect,
+    const TCHAR* EventLabel)
+{
+    GraphBuilder.AddPass(
+        RDG_EVENT_NAME("KasumiSplat.%s", EventLabel),
+        Parameters,
+        ERDGPassFlags::Raster,
+        [Parameters, VertexShader, PixelShader, ViewRect](FRDGAsyncTask, FRHICommandList& RHICmdList)
+        {
+            FGraphicsPipelineStateInitializer GraphicsPSOInit;
+            RHICmdList.ApplyCachedRenderTargets(GraphicsPSOInit);
+            GraphicsPSOInit.BlendState = TStaticBlendState<CW_RGBA>::GetRHI();
             GraphicsPSOInit.RasterizerState = TStaticRasterizerState<FM_Solid, CM_None>::GetRHI();
             GraphicsPSOInit.DepthStencilState = TStaticDepthStencilState<false, CF_Always>::GetRHI();
             GraphicsPSOInit.BoundShaderState.VertexDeclarationRHI = GEmptyVertexDeclaration.VertexDeclarationRHI;
@@ -251,15 +301,24 @@ public:
         // BeforeDOF executes before temporal upscaling in UE 5.8. Use the jittered matrix so splats,
         // scene depth, and the TSR input sample share the same projection.
         const FMatrix44f WorldToClip(View.ViewMatrices.GetWorldToClip());
+        const FMatrix44f PreviousWorldToClip(
+            View.bCameraCut
+                ? View.ViewMatrices.GetWorldToClip()
+                : GetRendererModule().GetPreviousViewMatrices(View).GetWorldToClip());
         TShaderMapRef<FKasumiSplatCullCS> CullShader(GetGlobalShaderMap(View.GetFeatureLevel()));
         TShaderMapRef<FKasumiSplatFinalizeTiledCS> FinalizeTiledShader(GetGlobalShaderMap(View.GetFeatureLevel()));
         TShaderMapRef<FKasumiSplatPrefixCS> PrefixShader(GetGlobalShaderMap(View.GetFeatureLevel()));
         TShaderMapRef<FKasumiSplatScatterCS> ScatterShader(GetGlobalShaderMap(View.GetFeatureLevel()));
         TShaderMapRef<FKasumiSplatInstanceVS> VertexShader(GetGlobalShaderMap(View.GetFeatureLevel()));
         TShaderMapRef<FKasumiSplatInstancePS> PixelShader(GetGlobalShaderMap(View.GetFeatureLevel()));
+        TShaderMapRef<FKasumiSplatVelocityPS> VelocityPixelShader(GetGlobalShaderMap(View.GetFeatureLevel()));
         const FRDGSystemTextures& SystemTextures = FRDGSystemTextures::IsValid(GraphBuilder)
             ? FRDGSystemTextures::Get(GraphBuilder)
             : FRDGSystemTextures::Create(GraphBuilder);
+        FRDGTextureRef VelocityTexture = UE::FXRenderingUtils::GetSceneVelocityTexture(View);
+        FRDGTextureRef SceneDepthTexture = Inputs.SceneTextures.SceneTextures
+            ? Inputs.SceneTextures.SceneTextures->GetParameters()->SceneDepthTexture
+            : SystemTextures.Black;
 
         for (const TSharedPtr<FKasumiSplatRenderEntry, ESPMode::ThreadSafe>& Entry : VisibleEntries)
         {
@@ -291,7 +350,54 @@ public:
                 : Entry->Packet.MaxProjectedRadiusPixels;
             const bool bTiledWasRequested =
                 ResolveKasumiSplatSortMode(Entry->Packet.SortMode, PointCount) == EKasumiSplatSortMode::Tiled;
-            const EKasumiSplatSortMode ResolvedSortMode =
+            if (Entry->bTiledOverflowReadbackPending &&
+                Entry->TiledOverflowReadback.IsValid() &&
+                Entry->TiledOverflowReadback->IsReady())
+            {
+                const uint32 OverflowCount = *static_cast<const uint32*>(
+                    Entry->TiledOverflowReadback->Lock(sizeof(uint32)));
+                Entry->TiledOverflowReadback->Unlock();
+                Entry->bTiledOverflowReadbackPending = false;
+                const bool bRelevantReadback = Entry->bTiledOverflowReadbackRelevant;
+                const bool bRecoveryProbe = Entry->bTiledOverflowRecoveryProbePending;
+                Entry->bTiledOverflowReadbackRelevant = false;
+                Entry->bTiledOverflowRecoveryProbePending = false;
+
+                if (bRelevantReadback &&
+                    Entry->Packet.TiledFallbackMode == EKasumiSplatTiledFallbackMode::Delayed)
+                {
+                    if (OverflowCount > 0u)
+                    {
+                        Entry->bDelayedTiledFallbackActive = true;
+                        Entry->DelayedTiledFallbackFramesRemaining = KasumiDelayedFallbackHoldFrames;
+                        Entry->LastDelayedTiledFallbackFrame = Entry->Packet.FrameNumber;
+                    }
+                    else if (bRecoveryProbe)
+                    {
+                        Entry->bDelayedTiledFallbackActive = false;
+                        Entry->DelayedTiledFallbackFramesRemaining = 0u;
+                    }
+                }
+            }
+
+            const bool bUseDelayedTiledFallback =
+                Entry->Packet.TiledFallbackMode == EKasumiSplatTiledFallbackMode::Delayed;
+            if (!bUseDelayedTiledFallback)
+            {
+                Entry->bDelayedTiledFallbackActive = false;
+                Entry->DelayedTiledFallbackFramesRemaining = 0u;
+                Entry->bTiledOverflowReadbackRelevant = false;
+            }
+            else if (Entry->bDelayedTiledFallbackActive &&
+                !Entry->bTiledOverflowReadbackPending &&
+                Entry->DelayedTiledFallbackFramesRemaining > 0u &&
+                Entry->LastDelayedTiledFallbackFrame != Entry->Packet.FrameNumber)
+            {
+                --Entry->DelayedTiledFallbackFramesRemaining;
+                Entry->LastDelayedTiledFallbackFrame = Entry->Packet.FrameNumber;
+            }
+
+            const EKasumiSplatSortMode PolicyResolvedSortMode =
                 ResolveKasumiSplatSortModeForView(
                     Entry->Packet.SortMode,
                     PointCount,
@@ -300,6 +406,18 @@ public:
                     Entry->Packet.MaxTilesPerSplat,
                     MaxProjectedRadiusPixels,
                     Entry->Packet.TiledPairBudgetMB);
+            const bool bDelayedRecoveryProbe = bUseDelayedTiledFallback &&
+                Entry->bDelayedTiledFallbackActive &&
+                !Entry->bTiledOverflowReadbackPending &&
+                Entry->DelayedTiledFallbackFramesRemaining == 0u &&
+                PolicyResolvedSortMode == EKasumiSplatSortMode::Tiled;
+            const EKasumiSplatSortMode ResolvedSortMode =
+                bUseDelayedTiledFallback &&
+                Entry->bDelayedTiledFallbackActive &&
+                !bDelayedRecoveryProbe &&
+                PolicyResolvedSortMode == EKasumiSplatSortMode::Tiled
+                    ? EKasumiSplatSortMode::GlobalRadix
+                    : PolicyResolvedSortMode;
             if (!Entry->bHasResolvedSortMode || Entry->LastResolvedSortMode != ResolvedSortMode)
             {
                 UE_LOG(
@@ -315,8 +433,13 @@ public:
                     Output.ViewRect.Height());
                 if (bTiledWasRequested && ResolvedSortMode == EKasumiSplatSortMode::GlobalRadix)
                 {
-                    UE_LOG(LogKasumiSplatRenderer, Display,
-                        TEXT("Tiled fallback reason: the view tile count or Tiled configuration is unsupported."));
+                    UE_LOG(
+                        LogKasumiSplatRenderer,
+                        Display,
+                        TEXT("Tiled fallback reason: %s."),
+                        Entry->bDelayedTiledFallbackActive
+                            ? TEXT("a delayed GPU overflow fallback is active")
+                            : TEXT("the view tile count or Tiled configuration is unsupported"));
                 }
                 Entry->LastResolvedSortMode = ResolvedSortMode;
                 Entry->bHasResolvedSortMode = true;
@@ -347,13 +470,22 @@ public:
             const bool bTiledFallbackPossible = bTiledPath &&
                 (MaximumTileOverlap > EffectiveMaxTilesPerSplat ||
                     MaximumConfiguredPairs > uint64(TileEntryCount));
+            const bool bSameFrameTiledFallback = bTiledFallbackPossible &&
+                (!bUseDelayedTiledFallback || bDelayedRecoveryProbe);
+            const bool bReadBackDelayedTiledOverflow = bTiledFallbackPossible &&
+                bUseDelayedTiledFallback;
+            if (bDelayedRecoveryProbe && !bTiledFallbackPossible)
+            {
+                Entry->bDelayedTiledFallbackActive = false;
+                Entry->DelayedTiledFallbackFramesRemaining = 0u;
+            }
             const uint32 TileBits = FMath::Clamp(FMath::CeilLogTwo(FMath::Max(TileCount, 2u)), 1u, 16u);
             const uint32 TileDepthBits = 32u - TileBits;
             const FUintVector4 TileConfig(TileSize, TileCountX, TileCountY, TileDepthBits);
             const uint32 BucketPointBufferCount = bBucketPath ? PointCount : 1u;
             const uint32 BucketTableCount = bBucketPath ? KasumiDepthBucketCount : 1u;
-            const uint32 ExactKeyBufferCount = (bGlobalPath || bTiledFallbackPossible) ? PointCount : 1u;
-            const uint32 ExactValueBufferCount = (bBucketPath || bGlobalPath || bTiledFallbackPossible)
+            const uint32 ExactKeyBufferCount = (bGlobalPath || bSameFrameTiledFallback) ? PointCount : 1u;
+            const uint32 ExactValueBufferCount = (bBucketPath || bGlobalPath || bSameFrameTiledFallback)
                 ? PointCount
                 : 1u;
 
@@ -418,7 +550,7 @@ public:
             AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(TileKeys1, PF_R32_UINT), 0xffffffffu);
             AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(TileValues0, PF_R32_UINT), 0xffffffffu);
             AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(TileValues1, PF_R32_UINT), 0xffffffffu);
-            if (bGlobalPath || bTiledFallbackPossible)
+            if (bGlobalPath || bSameFrameTiledFallback)
             {
                 AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ExactKeys1, PF_R32_UINT), 0xffffffffu);
                 AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ExactValues1, PF_R32_UINT), 0xffffffffu);
@@ -523,7 +655,7 @@ public:
             CullParameters->SourcePointCount = SourcePointCount;
             CullParameters->UseLogDepthSort = View.IsPerspectiveProjection() ? 1u : 0u;
             CullParameters->SortPath = bBucketPath ? 0u : (bGlobalPath ? 1u : 2u);
-            CullParameters->EnableTiledFallback = bTiledFallbackPossible ? 1u : 0u;
+            CullParameters->EnableTiledFallback = bSameFrameTiledFallback ? 1u : 0u;
             CullParameters->MaxTilesPerSplat = EffectiveMaxTilesPerSplat;
             CullParameters->TilePairCapacity = TileEntryCount;
             CullParameters->TileDepthBits = TileDepthBits;
@@ -596,7 +728,7 @@ public:
             }
             else
             {
-                if (bTiledFallbackPossible)
+                if (bSameFrameTiledFallback)
                 {
                     // Keep a global ordering ready for the same frame. FinalizeTiledCS selects it
                     // only when the generated tile-pair list exceeds the configured limits.
@@ -635,6 +767,23 @@ public:
                         FinalizeParameters,
                         FIntVector(1, 1, 1));
                 }
+
+                if (bReadBackDelayedTiledOverflow && !Entry->bTiledOverflowReadbackPending)
+                {
+                    if (!Entry->TiledOverflowReadback.IsValid())
+                    {
+                        Entry->TiledOverflowReadback = MakeUnique<FRHIGPUBufferReadback>(
+                            TEXT("KasumiSplat.TiledOverflow"));
+                    }
+                    AddEnqueueCopyPass(
+                        GraphBuilder,
+                        Entry->TiledOverflowReadback.Get(),
+                        TileOverflow,
+                        sizeof(uint32));
+                    Entry->bTiledOverflowReadbackPending = true;
+                    Entry->bTiledOverflowReadbackRelevant = true;
+                    Entry->bTiledOverflowRecoveryProbePending = bDelayedRecoveryProbe;
+                }
             }
 
             FKasumiSplatDrawParameters* Parameters = GraphBuilder.AllocParameters<FKasumiSplatDrawParameters>();
@@ -649,6 +798,12 @@ public:
             Parameters->VS.TileKeys = GraphBuilder.CreateSRV(TileKeys0, PF_R32_UINT);
             Parameters->VS.LocalToWorld = LocalToWorld;
             Parameters->VS.WorldToClip = WorldToClip;
+            const bool bResetVelocity = View.bCameraCut ||
+                Entry->Packet.bResetVelocityHistory ||
+                !Entry->bVelocityHistoryValid;
+            Parameters->VS.PreviousLocalToWorld = FMatrix44f(
+                (bResetVelocity ? Entry->Packet.LocalToWorld : Entry->PreviousLocalToWorld).ToMatrixWithScale());
+            Parameters->VS.PreviousWorldToClip = bResetVelocity ? WorldToClip : PreviousWorldToClip;
             Parameters->VS.LocalToSHDirection = Entry->Packet.LocalToSHDirection;
             Parameters->VS.ViewSize = ViewSize;
             Parameters->VS.Tint = FVector4f(
@@ -707,7 +862,7 @@ public:
                 ViewRect,
                 TEXT("DepthSorted"));
 
-            if (bTiledFallbackPossible)
+            if (bSameFrameTiledFallback)
             {
                 FKasumiSplatDrawParameters* FallbackParameters =
                     GraphBuilder.AllocParameters<FKasumiSplatDrawParameters>();
@@ -724,6 +879,51 @@ public:
                     PixelShader,
                     ViewRect,
                     TEXT("TiledOverflowFallback"));
+            }
+
+            if (Entry->Packet.VelocityMode == EKasumiSplatVelocityMode::ActorAndCamera && VelocityTexture)
+            {
+                FKasumiSplatVelocityDrawParameters* VelocityParameters =
+                    GraphBuilder.AllocParameters<FKasumiSplatVelocityDrawParameters>();
+                VelocityParameters->VS = Parameters->VS;
+                VelocityParameters->PS.View = View.ViewUniformBuffer;
+                VelocityParameters->PS.VelocitySceneDepthTexture = SceneDepthTexture;
+                VelocityParameters->PS.SceneDepthBias = Entry->Packet.SceneDepthBias;
+                VelocityParameters->PS.UseSceneDepth = Entry->Packet.bUseSceneDepth ? 1u : 0u;
+                VelocityParameters->PS.ViewRectMin = FVector2f(Output.ViewRect.Min.X, Output.ViewRect.Min.Y);
+                VelocityParameters->PS.TileConfig = TileConfig;
+                VelocityParameters->PS.UseTilePairs = ResolvedSortMode == EKasumiSplatSortMode::Tiled ? 1u : 0u;
+                VelocityParameters->IndirectArgs = bTiledPath ? TileDrawIndirectArgs : DrawIndirectArgs;
+                VelocityParameters->RenderTargets[0] = FRenderTargetBinding(
+                    VelocityTexture,
+                    ERenderTargetLoadAction::ELoad);
+
+                AddKasumiVelocityPass(
+                    GraphBuilder,
+                    VelocityParameters,
+                    VertexShader,
+                    VelocityPixelShader,
+                    ViewRect,
+                    TEXT("Velocity"));
+
+                if (bSameFrameTiledFallback)
+                {
+                    FKasumiSplatVelocityDrawParameters* VelocityFallbackParameters =
+                        GraphBuilder.AllocParameters<FKasumiSplatVelocityDrawParameters>();
+                    *VelocityFallbackParameters = *VelocityParameters;
+                    VelocityFallbackParameters->VS.VisibleIndices = GraphBuilder.CreateSRV(ExactValues0, PF_R32_UINT);
+                    VelocityFallbackParameters->VS.UseTilePairs = 0u;
+                    VelocityFallbackParameters->PS.UseTilePairs = 0u;
+                    VelocityFallbackParameters->IndirectArgs = DrawIndirectArgs;
+
+                    AddKasumiVelocityPass(
+                        GraphBuilder,
+                        VelocityFallbackParameters,
+                        VertexShader,
+                        VelocityPixelShader,
+                        ViewRect,
+                        TEXT("VelocityTiledOverflowFallback"));
+                }
             }
         }
 
@@ -786,7 +986,22 @@ namespace KasumiSplat
                 {
                     Entry->PointBuffer.SafeRelease();
                     Entry->SHBuffer.SafeRelease();
+                    Entry->bTiledOverflowReadbackRelevant = false;
+                    Entry->bTiledOverflowRecoveryProbePending = false;
+                    Entry->bDelayedTiledFallbackActive = false;
+                    Entry->DelayedTiledFallbackFramesRemaining = 0u;
                 }
+                const bool bNewFrame = Entry->LastPublishFrame != Packet.FrameNumber;
+                if (!Entry->bVelocityHistoryValid || Packet.bResetVelocityHistory)
+                {
+                    Entry->PreviousLocalToWorld = Packet.LocalToWorld;
+                    Entry->bVelocityHistoryValid = true;
+                }
+                else if (bNewFrame)
+                {
+                    Entry->PreviousLocalToWorld = Entry->Packet.LocalToWorld;
+                }
+                Entry->LastPublishFrame = Packet.FrameNumber;
                 Entry->Packet = MoveTemp(Packet);
             });
     }

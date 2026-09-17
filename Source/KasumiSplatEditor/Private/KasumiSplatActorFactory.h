@@ -17,4 +17,5 @@ public:
     virtual bool CanCreateActorFrom(const FAssetData& AssetData, FText& OutErrorMsg) override;
     virtual void PostSpawnActor(UObject* Asset, AActor* NewActor) override;
     virtual UObject* GetAssetFromActorInstance(AActor* ActorInstance) override;
+    virtual FString GetDefaultActorLabel(UObject* Asset) const override;
 };

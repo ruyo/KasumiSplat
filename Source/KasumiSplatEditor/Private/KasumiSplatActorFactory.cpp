@@ -4,6 +4,7 @@
 #include "KasumiSplatActor.h"
 #include "KasumiSplatAsset.h"
 #include "KasumiSplatComponent.h"
+#include "KasumiSplatNaming.h"
 
 #define LOCTEXT_NAMESPACE "KasumiSplatActorFactory"
 
@@ -46,6 +47,11 @@ UObject* UKasumiSplatActorFactory::GetAssetFromActorInstance(AActor* ActorInstan
     return SplatActor && SplatActor->SplatComponent
         ? SplatActor->SplatComponent->Asset.Get()
         : nullptr;
+}
+
+FString UKasumiSplatActorFactory::GetDefaultActorLabel(UObject* Asset) const
+{
+    return KasumiSplatNaming::MakeActorLabel(Asset);
 }
 
 #undef LOCTEXT_NAMESPACE

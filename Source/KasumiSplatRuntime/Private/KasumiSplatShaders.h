@@ -146,6 +146,8 @@ public:
         SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
         SHADER_PARAMETER(FMatrix44f, LocalToWorld)
         SHADER_PARAMETER(FMatrix44f, WorldToClip)
+        SHADER_PARAMETER(FMatrix44f, PreviousLocalToWorld)
+        SHADER_PARAMETER(FMatrix44f, PreviousWorldToClip)
         SHADER_PARAMETER(FMatrix44f, LocalToSHDirection)
         SHADER_PARAMETER(FVector2f, ViewSize)
         SHADER_PARAMETER(FVector4f, Tint)
@@ -194,6 +196,28 @@ public:
 
     BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
         SHADER_PARAMETER_STRUCT_INCLUDE(FSceneTextureShaderParameters, SceneTextures)
+        SHADER_PARAMETER(float, SceneDepthBias)
+        SHADER_PARAMETER(uint32, UseSceneDepth)
+        SHADER_PARAMETER(FVector2f, ViewRectMin)
+        SHADER_PARAMETER(FUintVector4, TileConfig)
+        SHADER_PARAMETER(uint32, UseTilePairs)
+    END_SHADER_PARAMETER_STRUCT()
+
+    static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+    {
+        return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM6);
+    }
+};
+
+class FKasumiSplatVelocityPS : public FGlobalShader
+{
+public:
+    DECLARE_GLOBAL_SHADER(FKasumiSplatVelocityPS);
+    SHADER_USE_PARAMETER_STRUCT(FKasumiSplatVelocityPS, FGlobalShader);
+
+    BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+        SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+        SHADER_PARAMETER_RDG_TEXTURE(Texture2D, VelocitySceneDepthTexture)
         SHADER_PARAMETER(float, SceneDepthBias)
         SHADER_PARAMETER(uint32, UseSceneDepth)
         SHADER_PARAMETER(FVector2f, ViewRectMin)

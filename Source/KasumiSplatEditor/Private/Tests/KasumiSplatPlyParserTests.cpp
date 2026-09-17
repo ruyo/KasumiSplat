@@ -131,8 +131,8 @@ bool FKasumiSplatCompatibilityPlyTest::RunTest(const FString& Parameters)
     Options.UnitsToCentimeters = 10.0;
     Options.bUseLumaAICoordinates = true;
     TestTrue(TEXT("Luma AI coordinate PLY parses"), FKasumiSplatPlyParser::Parse(Bytes, Options, Result, Error));
-    TestTrue(TEXT("Luma AI Y-up basis converts to Unreal"), Result.Points[0].Position.Equals(FVector(-30, 10, 20), 1.e-6));
-    const FVector4 LumaSHDirection = Result.LocalToSHDirection.TransformVector(FVector(-3, 1, 2));
+    TestTrue(TEXT("Luma AI PLY RDF basis converts to Unreal"), Result.Points[0].Position.Equals(FVector(30, 10, -20), 1.e-6));
+    const FVector4 LumaSHDirection = Result.LocalToSHDirection.TransformVector(FVector(3, 1, -2));
     TestTrue(TEXT("Luma AI SH direction transform returns source direction"),
         FVector(LumaSHDirection.X, LumaSHDirection.Y, LumaSHDirection.Z).Equals(FVector(1, 2, 3), 1.e-6));
     if (!Error.IsEmpty()) AddError(Error);
@@ -286,7 +286,7 @@ bool FKasumiSplatImportProfileTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("Luma comment selects the Luma profile"),
         Result.ResolvedProfile, EKasumiSplatImportProfile::LumaAI);
     TestTrue(TEXT("Auto-detected Luma coordinates are converted"),
-        Result.Points.Num() == 1 && Result.Points[0].Position.Equals(FVector(-3, 1, 2), 1.e-6));
+        Result.Points.Num() == 1 && Result.Points[0].Position.Equals(FVector(3, 1, -2), 1.e-6));
     return true;
 }
 

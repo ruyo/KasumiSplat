@@ -56,6 +56,10 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Tiled", meta=(ClampMin="16", ClampMax="2048", Units="MB"))
     int32 TiledPairBudgetMB = 256;
 
+    /** Same Frame avoids missing output. Delayed skips the parallel sort but may suppress overflowing frames until GPU readback completes. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Tiled")
+    EKasumiSplatTiledFallbackMode TiledFallbackMode = EKasumiSplatTiledFallbackMode::SameFrame;
+
     /** Optional deterministic remapping of normalized Progress for Sequencer and Blueprint scrubbing. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Effects")
     TObjectPtr<UCurveFloat> ProgressCurve;
@@ -159,6 +163,10 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Temporal", meta=(ClampMin="0.0", ClampMax="2.0", Units="s"))
     float TemporalTransitionDuration = 0.15f;
 
+    /** Writes motion vectors for Actor transforms and camera movement. Disable to skip the Velocity pass. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Temporal")
+    EKasumiSplatVelocityMode VelocityMode = EKasumiSplatVelocityMode::ActorAndCamera;
+
     /** Limits needle-like source splats. The longest principal axis may be this many times the middle axis. Zero disables the limit. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Quality", meta=(ClampMin="0.0", UIMin="0.0", UIMax="256.0"))
     float MaxAnisotropy = 32.0f;
@@ -234,6 +242,7 @@ protected:
 
 private:
     FKasumiSplatStreamingState* StreamingState = nullptr;
+    bool bResetVelocityHistory = true;
     void RebuildSharedSourcePoints();
     void UpdateStreamingWorkingSet(bool bForce);
     FVector GetStreamingViewLocation() const;

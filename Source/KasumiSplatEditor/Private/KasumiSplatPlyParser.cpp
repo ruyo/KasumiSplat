@@ -304,7 +304,9 @@ namespace
     {
         if (Options.bUseLumaAICoordinates)
         {
-            return FVector(-Value.Z, Value.X, Value.Y);
+            // Luma's Gaussian PLY follows the common PLY basis: +X right,
+            // +Y down, +Z forward. Unreal uses +X forward, +Y right, +Z up.
+            return FVector(Value.Z, Value.X, -Value.Y);
         }
         FVector Result = Value;
         if (Options.bSwapYZ) Swap(Result.Y, Result.Z);

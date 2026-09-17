@@ -7,6 +7,7 @@
 #include "KasumiSplatActor.h"
 #include "KasumiSplatAsset.h"
 #include "KasumiSplatComponent.h"
+#include "KasumiSplatNaming.h"
 #include "KasumiSplatThumbnailRenderer.h"
 #include "Misc/App.h"
 #include "Misc/AutomationTest.h"
@@ -21,6 +22,13 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FKasumiSplatActorFactoryTest::RunTest(const FString& Parameters)
 {
+    TestEqual(TEXT("Imported asset prefix is added"), KasumiSplatNaming::MakeAssetName(TEXT("Garden")), FName(TEXT("KSA_Garden")));
+    TestEqual(TEXT("Imported asset prefix is not duplicated"), KasumiSplatNaming::MakeAssetName(TEXT("KSA_Garden")), FName(TEXT("KSA_Garden")));
+    TestEqual(
+        TEXT("Imported package name matches the prefixed asset name"),
+        KasumiSplatNaming::MakeAssetPackageName(TEXT("/Game/Scans/Garden"), TEXT("KSA_Garden")),
+        FString(TEXT("/Game/Scans/KSA_Garden")));
+
     UKasumiSplatActorFactory* Factory = nullptr;
     if (GEditor)
     {
@@ -39,7 +47,7 @@ bool FKasumiSplatActorFactoryTest::RunTest(const FString& Parameters)
         return false;
     }
 
-    UKasumiSplatAsset* Asset = NewObject<UKasumiSplatAsset>();
+    UKasumiSplatAsset* Asset = NewObject<UKasumiSplatAsset>(GetTransientPackage(), TEXT("KSA_Garden"));
     UKasumiSplatAsset* PreviewAsset = NewObject<UKasumiSplatAsset>();
     TArray<FKasumiSplatPoint> PreviewSource;
     PreviewSource.AddDefaulted_GetRef().Color = FLinearColor::White;
@@ -80,6 +88,11 @@ bool FKasumiSplatActorFactoryTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("Dropped asset is assigned to the component"), Actor->SplatComponent->Asset == Asset);
     TestFalse(TEXT("Imported data disables the synthetic fallback"), Actor->SplatComponent->bUseSyntheticFallback);
     TestTrue(TEXT("Actor factory exposes the assigned asset"), Factory->GetAssetFromActorInstance(Actor) == Asset);
+    TestEqual(TEXT("Placed actor label uses KS without retaining KSA"), Factory->GetDefaultActorLabel(Asset), FString(TEXT("KS_Garden")));
+    TestEqual(
+        TEXT("Placed actor label does not duplicate an existing KS prefix"),
+        KasumiSplatNaming::MakeActorLabel(NewObject<UKasumiSplatAsset>(GetTransientPackage(), TEXT("KS_Garden"))),
+        FString(TEXT("KS_Garden")));
 
     World->DestroyActor(Actor, false, false);
     return true;

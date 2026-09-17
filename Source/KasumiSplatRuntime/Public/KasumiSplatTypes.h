@@ -137,6 +137,14 @@ enum class EKasumiSplatSortMode : uint8
     Tiled
 };
 
+/** Selects whether a potentially overflowing Tiled sort prepares its Global Radix fallback immediately. */
+UENUM(BlueprintType)
+enum class EKasumiSplatTiledFallbackMode : uint8
+{
+    SameFrame UMETA(DisplayName="Same Frame (Stable)"),
+    Delayed UMETA(DisplayName="Delayed (Lower GPU Cost)")
+};
+
 /** Controls the screen-space Gaussian low-pass filter and its opacity normalization. */
 UENUM(BlueprintType)
 enum class EKasumiSplatAntialiasingMode : uint8
@@ -144,6 +152,14 @@ enum class EKasumiSplatAntialiasingMode : uint8
     Disabled UMETA(DisplayName="Disabled"),
     LegacyFilter UMETA(DisplayName="Legacy Filter"),
     AreaCompensated UMETA(DisplayName="Area Compensated")
+};
+
+/** Controls whether Kasumi Splat contributes motion vectors for temporal rendering. */
+UENUM(BlueprintType)
+enum class EKasumiSplatVelocityMode : uint8
+{
+    Disabled UMETA(DisplayName="Disabled"),
+    ActorAndCamera UMETA(DisplayName="Actor and Camera")
 };
 
 UENUM(BlueprintType)

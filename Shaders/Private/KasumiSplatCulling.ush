@@ -257,4 +257,6 @@ struct FKasumiVertexOutput
     nointerpolation float4 Color : COLOR0;
     nointerpolation uint TileIndex : TEXCOORD2;
     nointerpolation float DepthRadius : TEXCOORD3;
+    nointerpolation float4 CurrentCenterClip : TEXCOORD4;
+    nointerpolation float4 PreviousCenterClip : TEXCOORD5;
 };

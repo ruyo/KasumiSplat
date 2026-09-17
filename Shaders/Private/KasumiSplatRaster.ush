@@ -1,3 +1,5 @@
+#include "/Engine/Private/VelocityCommon.ush"
+
 float2 QuadCorner(uint VertexId)
 {
     if (VertexId == 0u) return float2(-1.0, -1.0);
@@ -38,6 +40,11 @@ FKasumiVertexOutput MainVS(uint VertexId : SV_VertexID, uint InstanceId : SV_Ins
     const float RadiusY = min(3.0 * sqrt(max(Covariance.z, 0.0)), MaxProjectedRadiusPixels);
     const float2 Corner = QuadCorner(VertexId);
     const float2 DeltaPixels = Corner * float2(RadiusX, RadiusY);
+
+    Output.CurrentCenterClip = CenterClip;
+    Output.PreviousCenterClip = mul(
+        mul(float4(TransformedLocalPosition, 1.0), PreviousLocalToWorld),
+        PreviousWorldToClip);
 
     CenterClip.xy += float2(
         2.0 * DeltaPixels.x / ViewSize.x,
@@ -88,4 +95,45 @@ float4 MainPS(FKasumiVertexOutput Input) : SV_Target0
 
     const float Alpha = min(0.99, saturate(Input.Color.a) * exp(Power));
     return float4(Input.Color.rgb * Alpha, Alpha);
+}
+
+ENCODED_VELOCITY_TYPE VelocityPS(FKasumiVertexOutput Input) : SV_Target0
+{
+    const uint2 PixelCoord = uint2(Input.Position.xy);
+    if (UseTilePairs != 0u && Input.TileIndex != 0xffffffffu)
+    {
+        const uint2 RelativePixelCoord = PixelCoord - uint2(ViewRectMin);
+        const uint2 PixelTile = RelativePixelCoord / TileConfig.x;
+        if (PixelTile.y * TileConfig.y + PixelTile.x != Input.TileIndex)
+        {
+            discard;
+        }
+    }
+
+    const float2 Delta = Input.DeltaPixels;
+    const float Power = -0.5 * (
+        Input.Conic.x * Delta.x * Delta.x +
+        2.0 * Input.Conic.y * Delta.x * Delta.y +
+        Input.Conic.z * Delta.y * Delta.y);
+    if (Power > 0.0 || Power < -4.5)
+    {
+        discard;
+    }
+
+    const float Alpha = min(0.99, saturate(Input.Color.a) * exp(Power));
+    if (Alpha < 0.05)
+    {
+        discard;
+    }
+
+    if (UseSceneDepth != 0u)
+    {
+        const float SceneDeviceZ = VelocitySceneDepthTexture.Load(int3(PixelCoord, 0)).r;
+        if (SceneDeviceZ > Input.Position.z + SceneDepthBias + Input.DepthRadius)
+        {
+            discard;
+        }
+    }
+
+    return EncodeVelocityToTexture(Calculate3DVelocity(Input.CurrentCenterClip, Input.PreviousCenterClip));
 }

@@ -1,4 +1,5 @@
 #include "KasumiSplatImportFactory.h"
+#include "KasumiSplatNaming.h"
 
 #include "EditorFramework/AssetImportData.h"
 #include "KasumiSplatAsset.h"
@@ -7,8 +8,10 @@
 #include "HAL/PlatformFileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Crc.h"
+#include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopedSlowTask.h"
+#include "UObject/Package.h"
 #include "Editor.h"
 #include "IDetailsView.h"
 #include "Modules/ModuleManager.h"
@@ -337,7 +340,49 @@ UObject* UKasumiSplatImportFactory::FactoryCreateFile(
     bool& bOutOperationCanceled)
 {
     bOutOperationCanceled = false;
-    UKasumiSplatAsset* Asset = NewObject<UKasumiSplatAsset>(InParent, InClass, InName, Flags);
+    const FName AssetName = KasumiSplatNaming::MakeAssetName(InName);
+    UPackage* SourcePackage = InParent ? InParent->GetOutermost() : nullptr;
+    if (!SourcePackage)
+    {
+        UE_LOG(LogKasumiSplatImport, Error, TEXT("Cannot import '%s' without a destination package."), *Filename);
+        return nullptr;
+    }
+
+    const FString AssetPackageName = KasumiSplatNaming::MakeAssetPackageName(SourcePackage->GetName(), AssetName);
+    UPackage* AssetPackage = SourcePackage;
+    if (SourcePackage->GetName() != AssetPackageName)
+    {
+        AssetPackage = FindPackage(nullptr, *AssetPackageName);
+        if (!AssetPackage && FPackageName::DoesPackageExist(AssetPackageName))
+        {
+            AssetPackage = LoadPackage(nullptr, *AssetPackageName, LOAD_None);
+        }
+        if (!AssetPackage)
+        {
+            AssetPackage = CreatePackage(*AssetPackageName);
+            AssetPackage->SetAssetAccessSpecifier(SourcePackage->GetAssetAccessSpecifier());
+        }
+    }
+
+    AssetPackage->FullyLoad();
+    UObject* ExistingObject = StaticFindObjectFast(UObject::StaticClass(), AssetPackage, AssetName);
+    UKasumiSplatAsset* Asset = Cast<UKasumiSplatAsset>(ExistingObject);
+    if (ExistingObject && !Asset)
+    {
+        UE_LOG(
+            LogKasumiSplatImport,
+            Error,
+            TEXT("Cannot import '%s': '%s.%s' is already used by %s."),
+            *Filename,
+            *AssetPackageName,
+            *AssetName.ToString(),
+            *ExistingObject->GetClass()->GetName());
+        return nullptr;
+    }
+    if (!Asset)
+    {
+        Asset = NewObject<UKasumiSplatAsset>(AssetPackage, InClass, AssetName, Flags);
+    }
     return Asset && ImportFile(*Asset, Filename, Warn, &bOutOperationCanceled) ? Asset : nullptr;
 }
 

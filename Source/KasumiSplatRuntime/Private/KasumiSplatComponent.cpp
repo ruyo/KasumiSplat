@@ -182,6 +182,7 @@ void UKasumiSplatComponent::OnUnregister()
 void UKasumiSplatComponent::OnUpdateTransform(EUpdateTransformFlags UpdateTransformFlags, ETeleportType Teleport)
 {
     Super::OnUpdateTransform(UpdateTransformFlags, Teleport);
+    bResetVelocityHistory |= Teleport != ETeleportType::None;
     Publish();
 }
 
@@ -559,6 +560,9 @@ void UKasumiSplatComponent::Publish()
     Packet.TransitionClasses = StreamingState->RenderSnapshot.TransitionClasses;
     Packet.HigherOrderSHCoefficientsPerPoint = uint32(StreamingState->RenderSnapshot.HigherOrderSHCoefficientsPerPoint);
     Packet.TemporalTransitionAlpha = StreamingState->TemporalTransitionAlpha;
+    Packet.VelocityMode = VelocityMode;
+    Packet.FrameNumber = GFrameCounter;
+    Packet.bResetVelocityHistory = bResetVelocityHistory;
     Packet.LocalToSHDirection = Asset ? FMatrix44f(Asset->LocalToSHDirection) : FMatrix44f::Identity;
     Packet.Style = Style;
     Packet.Appearance = Appearance;
@@ -567,6 +571,7 @@ void UKasumiSplatComponent::Publish()
     Packet.TileSizePixels = TileSizePixels > 0 ? uint32(TileSizePixels) : 0u;
     Packet.MaxTilesPerSplat = uint32(FMath::Max(MaxTilesPerSplat, 0));
     Packet.TiledPairBudgetMB = uint32(FMath::Max(TiledPairBudgetMB, 16));
+    Packet.TiledFallbackMode = TiledFallbackMode;
     if (ProgressCurve)
     {
         Packet.Style.Progress = FMath::Clamp(ProgressCurve->GetFloatValue(Style.Progress), 0.0f, 1.0f);
@@ -600,4 +605,5 @@ void UKasumiSplatComponent::Publish()
     KasumiSplatConfig::SanitizeRenderPacket(Packet);
 
     KasumiSplat::Publish(GetUniqueID(), MoveTemp(Packet));
+    bResetVelocityHistory = false;
 }

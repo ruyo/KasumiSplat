@@ -29,6 +29,8 @@ RWBuffer<uint> RWTileValues;
 
 float4x4 LocalToWorld;
 float4x4 WorldToClip;
+float4x4 PreviousLocalToWorld;
+float4x4 PreviousWorldToClip;
 float4x4 LocalToSHDirection;
 float2 ViewSize;
 float4 Tint;
@@ -73,6 +75,7 @@ float4 LayerVectorSeed[4];
 uint LayerCount;
 Texture2D ExternalMaskTexture2D;
 Texture3D ExternalMaskTexture3D;
+Texture2D VelocitySceneDepthTexture;
 SamplerState ExternalMaskSampler;
 float4 ExternalMaskCenterMode;
 float4 ExternalMaskExtentValues;
