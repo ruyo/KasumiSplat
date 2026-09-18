@@ -301,10 +301,6 @@ public:
         // BeforeDOF executes before temporal upscaling in UE 5.8. Use the jittered matrix so splats,
         // scene depth, and the TSR input sample share the same projection.
         const FMatrix44f WorldToClip(View.ViewMatrices.GetWorldToClip());
-        const FMatrix44f PreviousWorldToClip(
-            View.bCameraCut
-                ? View.ViewMatrices.GetWorldToClip()
-                : GetRendererModule().GetPreviousViewMatrices(View).GetWorldToClip());
         TShaderMapRef<FKasumiSplatCullCS> CullShader(GetGlobalShaderMap(View.GetFeatureLevel()));
         TShaderMapRef<FKasumiSplatFinalizeTiledCS> FinalizeTiledShader(GetGlobalShaderMap(View.GetFeatureLevel()));
         TShaderMapRef<FKasumiSplatPrefixCS> PrefixShader(GetGlobalShaderMap(View.GetFeatureLevel()));
@@ -803,7 +799,7 @@ public:
                 !Entry->bVelocityHistoryValid;
             Parameters->VS.PreviousLocalToWorld = FMatrix44f(
                 (bResetVelocity ? Entry->Packet.LocalToWorld : Entry->PreviousLocalToWorld).ToMatrixWithScale());
-            Parameters->VS.PreviousWorldToClip = bResetVelocity ? WorldToClip : PreviousWorldToClip;
+            Parameters->VS.ResetVelocityHistory = bResetVelocity ? 1u : 0u;
             Parameters->VS.LocalToSHDirection = Entry->Packet.LocalToSHDirection;
             Parameters->VS.ViewSize = ViewSize;
             Parameters->VS.Tint = FVector4f(

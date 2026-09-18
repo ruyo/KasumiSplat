@@ -41,10 +41,19 @@ FKasumiVertexOutput MainVS(uint VertexId : SV_VertexID, uint InstanceId : SV_Ins
     const float2 Corner = QuadCorner(VertexId);
     const float2 DeltaPixels = Corner * float2(RadiusX, RadiusY);
 
-    Output.CurrentCenterClip = CenterClip;
-    Output.PreviousCenterClip = mul(
-        mul(float4(TransformedLocalPosition, 1.0), PreviousLocalToWorld),
-        PreviousWorldToClip);
+    const float3 CurrentWorldPosition = mul(float4(TransformedLocalPosition, 1.0), LocalToWorld).xyz;
+    const float4 CurrentVelocityClip = mul(
+        float4(CurrentWorldPosition + DFHackToFloat(ResolvedView.PreViewTranslation), 1.0),
+        ResolvedView.TranslatedWorldToClip);
+    const float3 PreviousWorldPosition = mul(
+        float4(TransformedLocalPosition, 1.0),
+        PreviousLocalToWorld).xyz;
+    Output.CurrentCenterClip = CurrentVelocityClip;
+    Output.PreviousCenterClip = ResetVelocityHistory != 0u
+        ? CurrentVelocityClip
+        : mul(
+            float4(PreviousWorldPosition + DFHackToFloat(ResolvedView.PrevPreViewTranslation), 1.0),
+            ResolvedView.PrevTranslatedWorldToClip);
 
     CenterClip.xy += float2(
         2.0 * DeltaPixels.x / ViewSize.x,
