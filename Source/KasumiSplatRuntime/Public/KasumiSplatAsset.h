@@ -7,6 +7,22 @@
 
 class UAssetImportData;
 
+enum class EKasumiSplatBuildPhase : uint8
+{
+    Bounds,
+    MortonKeys,
+    Sort,
+    Reorder,
+    Pack,
+    Thumbnail,
+    BulkData
+};
+
+using FKasumiSplatBuildProgress = TFunction<bool(
+    EKasumiSplatBuildPhase Phase,
+    int64 Processed,
+    int64 Total)>;
+
 /** Compact, preprojected point used only by the Content Browser thumbnail renderer. */
 USTRUCT()
 struct KASUMISPLATRUNTIME_API FKasumiSplatThumbnailPoint
@@ -58,6 +74,10 @@ public:
     /** Importer choices restored when this asset is reimported. */
     UPROPERTY(VisibleAnywhere, Category="KasumiSplat|Import")
     FKasumiSplatImportSettingsSnapshot ImportSettings;
+
+    /** Initial Full Quality Reference value copied to Actors created by dragging this asset into a level. */
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="KasumiSplat|Placement")
+    bool bDefaultFullQualityReference = true;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="KasumiSplat")
     FBox LocalBounds = FBox(ForceInit);
@@ -112,7 +132,7 @@ public:
 
     virtual void Serialize(FArchive& Ar) override;
 
-    void SetImportedPoints(
+    bool SetImportedPoints(
         TArray<FKasumiSplatPoint>&& InPoints,
         const FString& InEncoding,
         double InUnitsToCentimeters,
@@ -120,7 +140,8 @@ public:
         int32 InHigherOrderSHCoefficientsPerPoint = 0,
         bool bInSpatiallySort = true,
         const FMatrix& InLocalToSHDirection = FMatrix::Identity,
-        EKasumiSplatImportProfile InResolvedImportProfile = EKasumiSplatImportProfile::Standard3DGS);
+        EKasumiSplatImportProfile InResolvedImportProfile = EKasumiSplatImportProfile::Standard3DGS,
+        FKasumiSplatBuildProgress ProgressCallback = {});
     bool LoadPoints(TArray<FKasumiSplatPoint>& OutPoints) const;
     bool LoadHigherOrderSH(TArray<float>& OutHigherOrderSH) const;
     bool LoadPointChunks(

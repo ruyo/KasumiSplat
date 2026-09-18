@@ -37,7 +37,11 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Effects")
     TArray<FKasumiSplatEffectLayer> EffectLayers;
 
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Quality")
+    /** Loads every source point and disables streaming LOD and point-culling limits for reference rendering. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Quality")
+    bool bFullQualityReference = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Quality", meta=(EditCondition="!bFullQualityReference"))
     EKasumiSplatQuality QualityPreset = EKasumiSplatQuality::High;
 
     /** Selects the GPU visibility and transparency ordering path. Auto currently chooses global radix sorting up to the configured point budget. */
@@ -45,19 +49,19 @@ public:
     EKasumiSplatSortMode SortMode = EKasumiSplatSortMode::Auto;
 
     /** Screen-tile edge length used by Tiled sorting. Values are rounded to a multiple of 8. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Tiled", meta=(ClampMin="16", ClampMax="128", UIMin="16", UIMax="128"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Tiled", meta=(ClampMin="16", ClampMax="128", UIMin="16", UIMax="128", EditCondition="SortMode == EKasumiSplatSortMode::Auto || SortMode == EKasumiSplatSortMode::Tiled"))
     int32 TileSizePixels = 32;
 
     /** Maximum number of tiles emitted by one splat in Tiled mode. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Tiled", meta=(ClampMin="1", ClampMax="256", UIMin="1", UIMax="256"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Tiled", meta=(ClampMin="1", ClampMax="256", UIMin="1", UIMax="256", EditCondition="SortMode == EKasumiSplatSortMode::Auto || SortMode == EKasumiSplatSortMode::Tiled"))
     int32 MaxTilesPerSplat = 64;
 
     /** Maximum memory used by variable-length tiled key/value pairs. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Tiled", meta=(ClampMin="16", ClampMax="2048", Units="MB"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Tiled", meta=(ClampMin="16", ClampMax="2048", Units="MB", EditCondition="SortMode == EKasumiSplatSortMode::Auto || SortMode == EKasumiSplatSortMode::Tiled"))
     int32 TiledPairBudgetMB = 256;
 
     /** Same Frame avoids missing output. Delayed skips the parallel sort but may suppress overflowing frames until GPU readback completes. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Tiled")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Tiled", meta=(EditCondition="SortMode == EKasumiSplatSortMode::Auto || SortMode == EKasumiSplatSortMode::Tiled"))
     EKasumiSplatTiledFallbackMode TiledFallbackMode = EKasumiSplatTiledFallbackMode::SameFrame;
 
     /** Optional deterministic remapping of normalized Progress for Sequencer and Blueprint scrubbing. */
@@ -105,43 +109,43 @@ public:
     bool bRenderSplats = true;
 
     /** Maximum source points considered by the GPU visibility pass. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Performance", meta=(ClampMin="1", UIMin="1"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Performance", meta=(ClampMin="1", UIMin="1", EditCondition="!bFullQualityReference"))
     int32 MaxVisibleSplats = 750000;
 
-    /** Loads and renders every source point for fixed-camera quality comparisons. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Quality")
-    bool bFullQualityReference = false;
-
     /** Stream only the nearest asset chunks into the CPU/GPU resident working set. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(EditCondition="!bFullQualityReference"))
     bool bEnableChunkStreaming = true;
 
     /** Hard upper bound for points retained by this component after LOD. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(ClampMin="1", UIMin="1000"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(ClampMin="1", UIMin="1000", EditCondition="!bFullQualityReference"))
     int32 MaxResidentSplats = 1000000;
 
     /** Approximate combined CPU and GPU working-set budget. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(ClampMin="16", UIMin="16", UIMax="4096", Units="MB"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(ClampMin="16", UIMin="16", UIMax="4096", Units="MB", EditCondition="!bFullQualityReference"))
     int32 StreamingMemoryBudgetMB = 256;
 
+    /** Preserve Coverage softens the whole capture; Preserve Detail keeps sharp nearby chunks and may leave distant regions absent. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(EditCondition="!bFullQualityReference"))
+    EKasumiSplatMemoryPressurePolicy MemoryPressurePolicy = EKasumiSplatMemoryPressurePolicy::PreserveDetail;
+
     /** Chunks beyond this distance are unloaded. Zero keeps all distances eligible. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(ClampMin="0", Units="cm"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(ClampMin="0", Units="cm", EditCondition="!bFullQualityReference"))
     float MaxStreamingDistance = 0.0f;
 
     /** Distance at which deterministic source-order LOD decimation begins. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(ClampMin="1", Units="cm"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(ClampMin="1", Units="cm", EditCondition="!bFullQualityReference"))
     float LODStartDistance = 2500.0f;
 
-    /** Largest source-order LOD stride. Use powers of two for stable transitions. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(ClampMin="1", ClampMax="64"))
+    /** Largest distance-driven LOD stride. The memory budget may raise it further to preserve full spatial coverage. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(ClampMin="1", ClampMax="64", EditCondition="!bFullQualityReference"))
     int32 MaxLODStride = 4;
 
     /** Minimum time between camera-driven streaming decisions. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(ClampMin="0.05", ClampMax="5.0", Units="s"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(ClampMin="0.05", ClampMax="5.0", Units="s", EditCondition="!bFullQualityReference"))
     float StreamingUpdateInterval = 0.25f;
 
     /** Splats smaller than this projected radius are removed by the GPU visibility pass. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Performance", meta=(ClampMin="0.0", UIMin="0.0", UIMax="4.0"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Performance", meta=(ClampMin="0.0", UIMin="0.0", UIMax="4.0", EditCondition="!bFullQualityReference"))
     float MinProjectedRadiusPixels = 0.25f;
 
     /** Prevents near-camera splats from expanding to an unbounded screen size. */
@@ -157,10 +161,10 @@ public:
     EKasumiSplatAntialiasingMode AntialiasingMode = EKasumiSplatAntialiasingMode::AreaCompensated;
 
     /** Cross-fades resident-set changes to suppress visible streaming and LOD pops. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Temporal")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Temporal", meta=(EditCondition="!bFullQualityReference"))
     bool bTemporalStabilization = true;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Temporal", meta=(ClampMin="0.0", ClampMax="2.0", Units="s"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Temporal", meta=(ClampMin="0.0", ClampMax="2.0", Units="s", EditCondition="!bFullQualityReference && bTemporalStabilization"))
     float TemporalTransitionDuration = 0.15f;
 
     /** Writes motion vectors for Actor transforms and camera movement. Disable to skip the Velocity pass. */
@@ -183,7 +187,7 @@ public:
     bool bUseSceneDepth = true;
 
     /** Center-depth pre-cull is limited to small splats to avoid removing large, partially visible ellipses. Zero disables it. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering", meta=(ClampMin="0.0", ClampMax="64.0"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering", meta=(ClampMin="0.0", ClampMax="64.0", EditCondition="!bFullQualityReference"))
     float DepthPreCullMaxRadiusPixels = 8.0f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Debug")

@@ -43,6 +43,7 @@ struct FKasumiSplatStreamingSettings
 {
     int32 MemoryBudgetMB = 256;
     int32 MaxResidentSplats = 1000000;
+    EKasumiSplatMemoryPressurePolicy MemoryPressurePolicy = EKasumiSplatMemoryPressurePolicy::PreserveDetail;
     float MaxDistance = 0.0f;
     float LODStartDistance = 2500.0f;
     int32 MaxLODStride = 4;
@@ -60,6 +61,8 @@ FKasumiSplatStreamingSelection BuildKasumiSplatStreamingSelection(
     const UKasumiSplatAsset& Asset,
     const FVector& LocalView,
     const FKasumiSplatStreamingSettings& Settings);
+
+int64 EstimateKasumiSplatResidentBytesPerPoint(int32 HigherOrderSHCoefficientsPerPoint);
 
 int32 ResolveKasumiSplatLODStride(
     double Distance,

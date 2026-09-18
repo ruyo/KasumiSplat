@@ -83,6 +83,9 @@ struct KASUMISPLATRUNTIME_API FKasumiSplatImportSettingsSnapshot
 
     UPROPERTY()
     bool bSpatiallySortForStreaming = true;
+
+    UPROPERTY()
+    bool bDefaultFullQualityReference = true;
 };
 
 UENUM(BlueprintType)
@@ -160,6 +163,14 @@ enum class EKasumiSplatVelocityMode : uint8
 {
     Disabled UMETA(DisplayName="Disabled"),
     ActorAndCamera UMETA(DisplayName="Actor and Camera")
+};
+
+/** Selects how streaming responds when the resident memory budget cannot retain full detail. */
+UENUM(BlueprintType)
+enum class EKasumiSplatMemoryPressurePolicy : uint8
+{
+    PreserveCoverage UMETA(DisplayName="Preserve Coverage (Integrated LOD)"),
+    PreserveDetail UMETA(DisplayName="Preserve Detail (Drop Distant Chunks)")
 };
 
 UENUM(BlueprintType)

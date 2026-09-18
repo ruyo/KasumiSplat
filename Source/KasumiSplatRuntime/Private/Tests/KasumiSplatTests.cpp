@@ -169,6 +169,80 @@ bool FKasumiSplatSpatialChunkTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FKasumiSplatBuildProgressTest, "KasumiSplat.Storage.BuildProgressAndSHReorder",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FKasumiSplatBuildProgressTest::RunTest(const FString& Parameters)
+{
+    UKasumiSplatAsset* Asset = NewObject<UKasumiSplatAsset>();
+    TArray<FKasumiSplatPoint> Source;
+    TArray<float> SourceSH;
+    const double Positions[] = {100.0, -100.0, 50.0, -50.0};
+    for (int32 Index = 0; Index < UE_ARRAY_COUNT(Positions); ++Index)
+    {
+        FKasumiSplatPoint& Point = Source.AddDefaulted_GetRef();
+        Point.StableId = Index;
+        Point.Position = FVector(Positions[Index], 0.0, 0.0);
+        SourceSH.Append({float(Index) + 0.1f, float(Index) + 0.2f, float(Index) + 0.3f});
+    }
+
+    TSet<EKasumiSplatBuildPhase> ReportedPhases;
+    const bool bBuilt = Asset->SetImportedPoints(
+        MoveTemp(Source),
+        TEXT("ProgressTest"),
+        1.0,
+        MoveTemp(SourceSH),
+        3,
+        true,
+        FMatrix::Identity,
+        EKasumiSplatImportProfile::Standard3DGS,
+        [&ReportedPhases](EKasumiSplatBuildPhase Phase, int64, int64)
+        {
+            ReportedPhases.Add(Phase);
+            return true;
+        });
+    TestTrue(TEXT("Progress-aware asset build succeeds"), bBuilt);
+    TestEqual(TEXT("Every build phase reports progress"), ReportedPhases.Num(), 7);
+
+    TArray<FKasumiSplatPoint> Loaded;
+    TArray<float> LoadedSH;
+    TestTrue(TEXT("Progress-built points load"), Asset->LoadPoints(Loaded));
+    TestTrue(TEXT("Progress-built SH loads"), Asset->LoadHigherOrderSH(LoadedSH));
+    TestEqual(TEXT("Reordered SH count is preserved"), LoadedSH.Num(), Loaded.Num() * 3);
+    for (int32 Index = 0; Index < Loaded.Num(); ++Index)
+    {
+        TestTrue(
+            TEXT("SH remains paired with its point after in-place reorder"),
+            FMath::IsNearlyEqual(LoadedSH[Index * 3], float(Loaded[Index].StableId) + 0.1f));
+    }
+
+    TArray<FKasumiSplatPoint> CancelSource;
+    CancelSource.SetNum(8192);
+    for (int32 Index = 0; Index < CancelSource.Num(); ++Index)
+    {
+        CancelSource[Index].StableId = Index + 100;
+        CancelSource[Index].Position = FVector(Index, Index % 17, 0.0);
+    }
+    const bool bCancelled = !Asset->SetImportedPoints(
+        MoveTemp(CancelSource),
+        TEXT("CancelledTest"),
+        1.0,
+        {},
+        0,
+        true,
+        FMatrix::Identity,
+        EKasumiSplatImportProfile::Standard3DGS,
+        [](EKasumiSplatBuildPhase Phase, int64 Processed, int64)
+        {
+            return Phase != EKasumiSplatBuildPhase::MortonKeys || Processed < 4096;
+        });
+    TestTrue(TEXT("Build can be cancelled during Morton-key generation"), bCancelled);
+    Loaded.Reset();
+    TestTrue(TEXT("Cancellation preserves the previous asset payload"), Asset->LoadPoints(Loaded));
+    TestEqual(TEXT("Cancellation preserves the previous point count"), Loaded.Num(), 4);
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FKasumiSplatQualityPresetTest, "KasumiSplat.Settings.QualityPresets",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
@@ -295,6 +369,55 @@ bool FKasumiSplatTransitionSnapshotTest::RunTest(const FString& Parameters)
         TestEqual(TEXT("Entering point uses target SH"), (*Merged.HigherOrderSH)[1], 300.0f);
         TestEqual(TEXT("Leaving point keeps previous SH"), (*Merged.HigherOrderSH)[2], 10.0f);
     }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FKasumiSplatBudgetCoverageTest, "KasumiSplat.Streaming.BudgetPreservesCoverage",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FKasumiSplatBudgetCoverageTest::RunTest(const FString& Parameters)
+{
+    UKasumiSplatAsset* Asset = NewObject<UKasumiSplatAsset>();
+    Asset->LocalBounds = FBox(FVector(-400.0), FVector(400.0));
+    Asset->PackedPointCount = 8 * 65536;
+    Asset->HigherOrderSHCoefficientsPerPoint = 45;
+    for (int32 ChunkIndex = 0; ChunkIndex < 8; ++ChunkIndex)
+    {
+        FKasumiSplatChunk& Chunk = Asset->Chunks.AddDefaulted_GetRef();
+        Chunk.FirstPoint = ChunkIndex * 65536;
+        Chunk.PointCount = 65536;
+        const double X = -350.0 + ChunkIndex * 100.0;
+        Chunk.LocalBounds = FBox(FVector(X - 10.0, -10.0, -10.0), FVector(X + 10.0, 10.0, 10.0));
+    }
+
+    FKasumiSplatStreamingSettings Settings;
+    Settings.MemoryBudgetMB = 64;
+    Settings.MaxResidentSplats = 1000000;
+    Settings.MemoryPressurePolicy = EKasumiSplatMemoryPressurePolicy::PreserveCoverage;
+    Settings.LODStartDistance = 100000.0f;
+    Settings.MaxLODStride = 1;
+    const FKasumiSplatStreamingSelection Selection =
+        BuildKasumiSplatStreamingSelection(*Asset, FVector::ZeroVector, Settings);
+
+    TestEqual(TEXT("Every eligible spatial chunk remains selected"), Selection.ChunkIndices.Num(), 8);
+    for (int32 ChunkIndex = 0; ChunkIndex < Selection.ChunkIndices.Num(); ++ChunkIndex)
+    {
+        TestEqual(TEXT("Morton chunk order is preserved"), Selection.ChunkIndices[ChunkIndex], ChunkIndex);
+    }
+    const int64 PointLimit = (int64(Settings.MemoryBudgetMB) * 1024 * 1024) /
+        EstimateKasumiSplatResidentBytesPerPoint(45);
+    TestTrue(TEXT("Memory pressure can exceed the distance LOD cap"), Selection.LODStride > Settings.MaxLODStride);
+    TestTrue(TEXT("Budget-selected LOD fits the estimated resident point limit"),
+        FMath::DivideAndRoundUp<int64>(Asset->PackedPointCount, Selection.LODStride) <= PointLimit);
+
+    Settings.MemoryPressurePolicy = EKasumiSplatMemoryPressurePolicy::PreserveDetail;
+    const FKasumiSplatStreamingSelection DetailSelection =
+        BuildKasumiSplatStreamingSelection(*Asset, FVector::ZeroVector, Settings);
+    TestEqual(TEXT("Preserve Detail retains the requested distance LOD"), DetailSelection.LODStride, 1);
+    TestTrue(TEXT("Preserve Detail drops chunks when full detail exceeds the budget"),
+        DetailSelection.ChunkIndices.Num() < Asset->Chunks.Num());
+    TestTrue(TEXT("Preserve Detail still keeps at least the nearest chunk"),
+        !DetailSelection.ChunkIndices.IsEmpty());
     return true;
 }
 

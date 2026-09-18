@@ -47,6 +47,7 @@ namespace
         Result.bQuaternionWFirst = Factory.bQuaternionWFirst;
         Result.bSkipInvalidPoints = Factory.bSkipInvalidPoints;
         Result.bSpatiallySortForStreaming = Factory.bSpatiallySortForStreaming;
+        Result.bDefaultFullQualityReference = Factory.bDefaultFullQualityReference;
         return Result;
     }
 
@@ -68,6 +69,7 @@ namespace
         Factory.bQuaternionWFirst = Settings.bQuaternionWFirst;
         Factory.bSkipInvalidPoints = Settings.bSkipInvalidPoints;
         Factory.bSpatiallySortForStreaming = Settings.bSpatiallySortForStreaming;
+        Factory.bDefaultFullQualityReference = Settings.bDefaultFullQualityReference;
     }
 
     FString BuildImportFingerprint(
@@ -76,7 +78,7 @@ namespace
         const UKasumiSplatImportFactory& Factory)
     {
         const FString FingerprintInput = FString::Printf(
-            TEXT("KasumiSplat-v%d|%lld|%lld|%.17g|%.17g|%lld|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d"),
+            TEXT("KasumiSplat-v%d|%lld|%lld|%.17g|%.17g|%lld|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d"),
             UKasumiSplatAsset::CurrentDataVersion,
             PlatformFile.FileSize(*Filename),
             PlatformFile.GetTimeStamp(*Filename).GetTicks(),
@@ -93,7 +95,8 @@ namespace
             Factory.bRgbValuesAreSRGB,
             Factory.bQuaternionWFirst,
             Factory.bSkipInvalidPoints,
-            Factory.bSpatiallySortForStreaming);
+            Factory.bSpatiallySortForStreaming,
+            Factory.bDefaultFullQualityReference);
         return FString::Printf(TEXT("%08x"), FCrc::StrCrc32(*FingerprintInput));
     }
 }
@@ -210,6 +213,7 @@ bool UKasumiSplatImportFactory::ImportFile(
     if (bOutOperationCanceled) *bOutOperationCanceled = false;
     FScopedSlowTask SlowTask(100.0f, LOCTEXT("ImportProgress", "Importing Gaussian splats..."));
     if (!FApp::IsUnattended() && !IsRunningCommandlet()) SlowTask.MakeDialog(true);
+    SlowTask.EnterProgressFrame(2.0f, LOCTEXT("PrepareImportProgress", "Preparing PLY import..."));
     double LastProgress = 0.0;
 
     FKasumiSplatPlyImportOptions Options;
@@ -232,7 +236,7 @@ bool UKasumiSplatImportFactory::ImportFile(
         const double Delta = FMath::Max(Progress - LastProgress, 0.0);
         if (Delta > 0.0)
         {
-            SlowTask.EnterProgressFrame(float(Delta * 90.0), FText::Format(
+            SlowTask.EnterProgressFrame(float(Delta * 55.0), FText::Format(
                 LOCTEXT("DecodeProgress", "Decoding splat {0} of {1}"),
                 FText::AsNumber(Processed),
                 FText::AsNumber(Total)));
@@ -292,15 +296,81 @@ bool UKasumiSplatImportFactory::ImportFile(
         return false;
     }
 
-    SlowTask.EnterProgressFrame(10.0f, LOCTEXT("BuildAssetProgress", "Building streaming chunks..."));
     if (SlowTask.ShouldCancel())
     {
         if (bOutOperationCanceled) *bOutOperationCanceled = true;
         return false;
     }
-    Asset.Modify();
     const int32 ImportedPointCount = Result.Points.Num();
-    Asset.SetImportedPoints(
+    TOptional<EKasumiSplatBuildPhase> LastBuildPhase;
+    double LastBuildProgress = 0.0;
+    const auto BuildProgress = [
+        &SlowTask,
+        &LastBuildPhase,
+        &LastBuildProgress,
+        bOutOperationCanceled](
+            EKasumiSplatBuildPhase Phase,
+            int64 Processed,
+            int64 Total)
+    {
+        float PhaseWeight = 0.0f;
+        FText PhaseText;
+        switch (Phase)
+        {
+        case EKasumiSplatBuildPhase::Bounds:
+            PhaseWeight = 5.0f;
+            PhaseText = LOCTEXT("BoundsProgress", "Calculating spatial bounds...");
+            break;
+        case EKasumiSplatBuildPhase::MortonKeys:
+            PhaseWeight = 6.0f;
+            PhaseText = LOCTEXT("MortonProgress", "Calculating spatial keys...");
+            break;
+        case EKasumiSplatBuildPhase::Sort:
+            PhaseWeight = 12.0f;
+            PhaseText = LOCTEXT("SortProgress", "Sorting splats for streaming...");
+            break;
+        case EKasumiSplatBuildPhase::Reorder:
+            PhaseWeight = 8.0f;
+            PhaseText = LOCTEXT("ReorderProgress", "Reordering point and SH data...");
+            break;
+        case EKasumiSplatBuildPhase::Pack:
+            PhaseWeight = 7.0f;
+            PhaseText = LOCTEXT("PackProgress", "Packing streaming chunks...");
+            break;
+        case EKasumiSplatBuildPhase::Thumbnail:
+            PhaseWeight = 1.0f;
+            PhaseText = LOCTEXT("ThumbnailProgress", "Building asset preview...");
+            break;
+        case EKasumiSplatBuildPhase::BulkData:
+            PhaseWeight = 4.0f;
+            PhaseText = LOCTEXT("BulkDataProgress", "Writing bulk data...");
+            break;
+        }
+
+        if (!LastBuildPhase.IsSet() || LastBuildPhase.GetValue() != Phase)
+        {
+            LastBuildPhase = Phase;
+            LastBuildProgress = 0.0;
+            SlowTask.EnterProgressFrame(0.0f, PhaseText);
+        }
+        const double Progress = Total > 0
+            ? FMath::Clamp(double(Processed) / double(Total), 0.0, 1.0)
+            : 1.0;
+        const double Delta = FMath::Max(Progress - LastBuildProgress, 0.0);
+        if (Delta > 0.0)
+        {
+            SlowTask.EnterProgressFrame(float(Delta * PhaseWeight), PhaseText);
+            LastBuildProgress = Progress;
+        }
+        // Once the bulk payload has been committed there is no partial state to
+        // roll back. Cancellation is accepted immediately before that commit.
+        const bool bCanCancel =
+            Phase != EKasumiSplatBuildPhase::BulkData || Processed < Total;
+        const bool bContinue = !bCanCancel || !SlowTask.ShouldCancel();
+        if (!bContinue && bOutOperationCanceled) *bOutOperationCanceled = true;
+        return bContinue;
+    };
+    if (!Asset.SetImportedPoints(
         MoveTemp(Result.Points),
         Result.Encoding,
         UnitsToCentimeters,
@@ -308,9 +378,15 @@ bool UKasumiSplatImportFactory::ImportFile(
         Result.HigherOrderSHCoefficientsPerPoint,
         bSpatiallySortForStreaming,
         Result.LocalToSHDirection,
-        Result.ResolvedProfile);
+        Result.ResolvedProfile,
+        BuildProgress))
+    {
+        UE_LOG(LogKasumiSplatImport, Display, TEXT("KasumiSplat import cancelled while building '%s'."), *Filename);
+        return false;
+    }
     Asset.ImportFingerprint = ImportFingerprint;
     Asset.ImportSettings = CaptureImportSettings(*this);
+    Asset.bDefaultFullQualityReference = bDefaultFullQualityReference;
 #if WITH_EDITORONLY_DATA
     if (Asset.AssetImportData) Asset.AssetImportData->Update(Filename);
 #endif

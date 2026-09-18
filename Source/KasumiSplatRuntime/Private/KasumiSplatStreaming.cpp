@@ -165,43 +165,81 @@ FKasumiSplatStreamingSelection BuildKasumiSplatStreamingSelection(
             Candidates.Add({ChunkIndex, DistanceSquared});
         }
     }
-    Candidates.Sort([](const FCandidate& A, const FCandidate& B)
-    {
-        if (A.DistanceSquared != B.DistanceSquared) return A.DistanceSquared < B.DistanceSquared;
-        return A.ChunkIndex < B.ChunkIndex;
-    });
 
     const int32 SHCount = Asset.GetHigherOrderSHCoefficientsPerPoint();
-    const int64 ApproxBytesPerPoint = sizeof(FKasumiSplatPoint) + 4 * sizeof(FVector4f) + int64(SHCount) * sizeof(float);
+    const int64 ApproxBytesPerPoint = EstimateKasumiSplatResidentBytesPerPoint(SHCount);
     const int64 BudgetBytes = int64(FMath::Max(16, Settings.MemoryBudgetMB)) * 1024 * 1024;
     const int32 BudgetPointCount = int32(FMath::Clamp<int64>(
         BudgetBytes / FMath::Max<int64>(ApproxBytesPerPoint, 1), 1, MAX_int32));
     const int32 PointLimit = FMath::Max(1, FMath::Min(Settings.MaxResidentSplats, BudgetPointCount));
 
-    FKasumiSplatStreamingSelection Result;
-    int32 SelectedPointCount = 0;
+    int64 EligiblePointCount = 0;
     for (const FCandidate& Candidate : Candidates)
     {
-        const int32 ChunkPointCount = Asset.Chunks[Candidate.ChunkIndex].PointCount;
-        if (!Result.ChunkIndices.IsEmpty() && SelectedPointCount + ChunkPointCount > PointLimit) continue;
-        Result.ChunkIndices.Add(Candidate.ChunkIndex);
-        SelectedPointCount += ChunkPointCount;
-        if (SelectedPointCount >= PointLimit) break;
+        EligiblePointCount += Asset.Chunks[Candidate.ChunkIndex].PointCount;
     }
 
+    FKasumiSplatStreamingSelection Result;
     const double CaptureDistance = FVector::Dist(LocalView, Asset.LocalBounds.GetClosestPointTo(LocalView));
-    Result.LODStride = ResolveKasumiSplatLODStride(
+    const int32 DistanceLODStride = ResolveKasumiSplatLODStride(
         CaptureDistance,
         Settings.LODStartDistance,
         Settings.MaxLODStride,
         Settings.PreviousLODStride);
+    if (Settings.MemoryPressurePolicy == EKasumiSplatMemoryPressurePolicy::PreserveCoverage)
+    {
+        const int64 RequiredStride = FMath::Max<int64>(1, FMath::DivideAndRoundUp(EligiblePointCount, int64(PointLimit)));
+        int32 BudgetLODStride = 1;
+        while (int64(BudgetLODStride) < RequiredStride && BudgetLODStride <= MAX_int32 / 2)
+        {
+            BudgetLODStride *= 2;
+        }
+        Result.LODStride = FMath::Max(DistanceLODStride, BudgetLODStride);
 
-    Result.Hash = GetTypeHash(Result.LODStride);
+        // Traversal follows chunk index order, which is the asset's Morton order.
+        Result.ChunkIndices.Reserve(Candidates.Num());
+        for (const FCandidate& Candidate : Candidates)
+        {
+            Result.ChunkIndices.Add(Candidate.ChunkIndex);
+        }
+    }
+    else
+    {
+        Result.LODStride = DistanceLODStride;
+        Candidates.Sort([](const FCandidate& A, const FCandidate& B)
+        {
+            if (A.DistanceSquared != B.DistanceSquared) return A.DistanceSquared < B.DistanceSquared;
+            return A.ChunkIndex < B.ChunkIndex;
+        });
+        int64 SelectedPointCount = 0;
+        for (const FCandidate& Candidate : Candidates)
+        {
+            const int64 ChunkPointCount = FMath::DivideAndRoundUp<int64>(
+                Asset.Chunks[Candidate.ChunkIndex].PointCount,
+                Result.LODStride);
+            if (!Result.ChunkIndices.IsEmpty() && SelectedPointCount + ChunkPointCount > PointLimit)
+            {
+                continue;
+            }
+            Result.ChunkIndices.Add(Candidate.ChunkIndex);
+            SelectedPointCount += ChunkPointCount;
+        }
+        // Restore Morton order before loading and Gaussian integration.
+        Result.ChunkIndices.Sort();
+    }
+
+    Result.Hash = HashCombineFast(GetTypeHash(Result.LODStride), GetTypeHash(Settings.MemoryPressurePolicy));
     for (const int32 ChunkIndex : Result.ChunkIndices)
     {
         Result.Hash = HashCombineFast(Result.Hash, GetTypeHash(ChunkIndex));
     }
     return Result;
+}
+
+int64 EstimateKasumiSplatResidentBytesPerPoint(int32 HigherOrderSHCoefficientsPerPoint)
+{
+    const int64 SHBytes = int64(FMath::Max(0, HigherOrderSHCoefficientsPerPoint)) * sizeof(float);
+    return sizeof(FKasumiSplatPoint) + 4 * sizeof(FVector4f) + 2 * SHBytes;
 }
 
 void ApplyKasumiSplatLOD(

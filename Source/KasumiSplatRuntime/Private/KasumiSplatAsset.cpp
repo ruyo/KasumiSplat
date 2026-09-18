@@ -215,7 +215,7 @@ void UKasumiSplatAsset::Serialize(FArchive& Ar)
     }
 }
 
-void UKasumiSplatAsset::SetImportedPoints(
+bool UKasumiSplatAsset::SetImportedPoints(
     TArray<FKasumiSplatPoint>&& InPoints,
     const FString& InEncoding,
     double InUnitsToCentimeters,
@@ -223,61 +223,158 @@ void UKasumiSplatAsset::SetImportedPoints(
     int32 InHigherOrderSHCoefficientsPerPoint,
     bool bInSpatiallySort,
     const FMatrix& InLocalToSHDirection,
-    EKasumiSplatImportProfile InResolvedImportProfile)
+    EKasumiSplatImportProfile InResolvedImportProfile,
+    FKasumiSplatBuildProgress ProgressCallback)
 {
-    PackedPointCount = InPoints.Num();
-    PointBulkDataVersion = 1;
-    SourceEncoding = InEncoding;
-    ImportedUnitsToCentimeters = InUnitsToCentimeters;
-    LocalToSHDirection = InLocalToSHDirection;
-    ResolvedImportProfile = InResolvedImportProfile;
-    HigherOrderSHCoefficientsPerPoint =
+    const int32 PointCount = InPoints.Num();
+    const int32 SHCoefficientsPerPoint =
         InHigherOrderSHCoefficientsPerPoint > 0 &&
-        InHigherOrderSH.Num() == PackedPointCount * InHigherOrderSHCoefficientsPerPoint
+        int64(InHigherOrderSH.Num()) == int64(PointCount) * InHigherOrderSHCoefficientsPerPoint
             ? InHigherOrderSHCoefficientsPerPoint
             : 0;
-    if (HigherOrderSHCoefficientsPerPoint == 0)
+    if (SHCoefficientsPerPoint == 0)
     {
         InHigherOrderSH.Reset();
     }
-    bSpatiallySorted = bInSpatiallySort && InPoints.Num() > 1;
-    if (bSpatiallySorted)
+
+    const auto ReportProgress = [&ProgressCallback](
+        EKasumiSplatBuildPhase Phase,
+        int64 Processed,
+        int64 Total)
+    {
+        return !ProgressCallback || ProgressCallback(Phase, Processed, Total);
+    };
+    const auto ShouldReport = [](int32 Index)
+    {
+        return (Index & 4095) == 0;
+    };
+
+    const bool bShouldSpatiallySort = bInSpatiallySort && PointCount > 1;
+    TArray<int32> Order;
+    if (bShouldSpatiallySort)
     {
         FBox SortBounds(ForceInit);
-        for (const FKasumiSplatPoint& Point : InPoints) SortBounds += Point.Position;
-        TArray<int32> Order;
-        Order.SetNumUninitialized(InPoints.Num());
-        for (int32 Index = 0; Index < Order.Num(); ++Index) Order[Index] = Index;
-        Order.StableSort([&InPoints, &SortBounds](int32 A, int32 B)
+        if (!ReportProgress(EKasumiSplatBuildPhase::Bounds, 0, PointCount)) return false;
+        for (int32 Index = 0; Index < PointCount; ++Index)
         {
-            return MortonKey(InPoints[A].Position, SortBounds) < MortonKey(InPoints[B].Position, SortBounds);
-        });
-        TArray<FKasumiSplatPoint> SortedPoints;
-        SortedPoints.Reserve(InPoints.Num());
-        TArray<float> SortedSH;
-        if (HigherOrderSHCoefficientsPerPoint > 0) SortedSH.Reserve(InHigherOrderSH.Num());
-        for (const int32 SourceIndex : Order)
+            SortBounds += InPoints[Index].Position;
+            if (ShouldReport(Index) &&
+                !ReportProgress(EKasumiSplatBuildPhase::Bounds, Index, PointCount)) return false;
+        }
+        if (!ReportProgress(EKasumiSplatBuildPhase::Bounds, PointCount, PointCount)) return false;
+
+        TArray<uint32> MortonKeys;
+        MortonKeys.SetNumUninitialized(PointCount);
+        Order.SetNumUninitialized(PointCount);
+        if (!ReportProgress(EKasumiSplatBuildPhase::MortonKeys, 0, PointCount)) return false;
+        for (int32 Index = 0; Index < PointCount; ++Index)
         {
-            SortedPoints.Add(MoveTemp(InPoints[SourceIndex]));
-            if (HigherOrderSHCoefficientsPerPoint > 0)
+            MortonKeys[Index] = MortonKey(InPoints[Index].Position, SortBounds);
+            Order[Index] = Index;
+            if (ShouldReport(Index) &&
+                !ReportProgress(EKasumiSplatBuildPhase::MortonKeys, Index, PointCount)) return false;
+        }
+        if (!ReportProgress(EKasumiSplatBuildPhase::MortonKeys, PointCount, PointCount)) return false;
+
+        // Stable least-significant-digit radix sort over the 30-bit Morton key.
+        // Keys are calculated once; the original index resolves equal-key ordering.
+        constexpr int32 BitsPerPass = 6;
+        constexpr int32 BucketCount = 1 << BitsPerPass;
+        constexpr int32 PassCount = 5;
+        TArray<int32> ScratchOrder;
+        ScratchOrder.SetNumUninitialized(PointCount);
+        if (!ReportProgress(EKasumiSplatBuildPhase::Sort, 0, PassCount)) return false;
+        for (int32 Pass = 0; Pass < PassCount; ++Pass)
+        {
+            int32 Counts[BucketCount] = {};
+            const int32 Shift = Pass * BitsPerPass;
+            for (const int32 SourceIndex : Order)
             {
-                SortedSH.Append(InHigherOrderSH.GetData() + int64(SourceIndex) * HigherOrderSHCoefficientsPerPoint, HigherOrderSHCoefficientsPerPoint);
+                ++Counts[(MortonKeys[SourceIndex] >> Shift) & (BucketCount - 1)];
+            }
+            int32 Offsets[BucketCount];
+            Offsets[0] = 0;
+            for (int32 Bucket = 1; Bucket < BucketCount; ++Bucket)
+            {
+                Offsets[Bucket] = Offsets[Bucket - 1] + Counts[Bucket - 1];
+            }
+            for (const int32 SourceIndex : Order)
+            {
+                const uint32 Bucket = (MortonKeys[SourceIndex] >> Shift) & (BucketCount - 1);
+                ScratchOrder[Offsets[Bucket]++] = SourceIndex;
+            }
+            Swap(Order, ScratchOrder);
+            if (!ReportProgress(EKasumiSplatBuildPhase::Sort, Pass + 1, PassCount)) return false;
+        }
+
+        // Apply destination-to-source permutation in place. SH only needs one
+        // point's coefficients as scratch instead of a second full SH array.
+        TBitArray<> Visited(false, PointCount);
+        TArray<float> SHScratch;
+        if (SHCoefficientsPerPoint > 0) SHScratch.SetNumUninitialized(SHCoefficientsPerPoint);
+        int32 ReorderedCount = 0;
+        if (!ReportProgress(EKasumiSplatBuildPhase::Reorder, 0, PointCount)) return false;
+        for (int32 Start = 0; Start < PointCount; ++Start)
+        {
+            if (Visited[Start]) continue;
+            FKasumiSplatPoint PointScratch = MoveTemp(InPoints[Start]);
+            if (SHCoefficientsPerPoint > 0)
+            {
+                FMemory::Memcpy(
+                    SHScratch.GetData(),
+                    InHigherOrderSH.GetData() + int64(Start) * SHCoefficientsPerPoint,
+                    int64(SHCoefficientsPerPoint) * sizeof(float));
+            }
+            int32 Destination = Start;
+            while (true)
+            {
+                Visited[Destination] = true;
+                ++ReorderedCount;
+                if (ShouldReport(ReorderedCount) &&
+                    !ReportProgress(EKasumiSplatBuildPhase::Reorder, ReorderedCount, PointCount)) return false;
+                const int32 Source = Order[Destination];
+                if (Source == Start)
+                {
+                    InPoints[Destination] = MoveTemp(PointScratch);
+                    if (SHCoefficientsPerPoint > 0)
+                    {
+                        FMemory::Memcpy(
+                            InHigherOrderSH.GetData() + int64(Destination) * SHCoefficientsPerPoint,
+                            SHScratch.GetData(),
+                            int64(SHCoefficientsPerPoint) * sizeof(float));
+                    }
+                    break;
+                }
+                InPoints[Destination] = MoveTemp(InPoints[Source]);
+                if (SHCoefficientsPerPoint > 0)
+                {
+                    FMemory::Memcpy(
+                        InHigherOrderSH.GetData() + int64(Destination) * SHCoefficientsPerPoint,
+                        InHigherOrderSH.GetData() + int64(Source) * SHCoefficientsPerPoint,
+                        int64(SHCoefficientsPerPoint) * sizeof(float));
+                }
+                Destination = Source;
             }
         }
-        InPoints = MoveTemp(SortedPoints);
-        InHigherOrderSH = MoveTemp(SortedSH);
+        if (!ReportProgress(EKasumiSplatBuildPhase::Reorder, PointCount, PointCount)) return false;
     }
-    DataVersion = CurrentDataVersion;
-    ++Revision;
+    else
+    {
+        if (!ReportProgress(EKasumiSplatBuildPhase::Bounds, 1, 1) ||
+            !ReportProgress(EKasumiSplatBuildPhase::MortonKeys, 1, 1) ||
+            !ReportProgress(EKasumiSplatBuildPhase::Sort, 1, 1) ||
+            !ReportProgress(EKasumiSplatBuildPhase::Reorder, 1, 1)) return false;
+    }
 
-    LocalBounds.Init();
-    Chunks.Reset();
+    FBox NewLocalBounds(ForceInit);
+    TArray<FKasumiSplatChunk> NewChunks;
     TArray<FPackedKasumiSplatPoint> Packed;
-    Packed.SetNumUninitialized(InPoints.Num());
-    for (int32 Index = 0; Index < InPoints.Num(); ++Index)
+    Packed.SetNumUninitialized(PointCount);
+    if (!ReportProgress(EKasumiSplatBuildPhase::Pack, 0, PointCount)) return false;
+    for (int32 Index = 0; Index < PointCount; ++Index)
     {
         const FKasumiSplatPoint& Point = InPoints[Index];
-        LocalBounds += Point.Position;
+        NewLocalBounds += Point.Position;
         FPackedKasumiSplatPoint& Target = Packed[Index];
         Target.Position = FVector3f(Point.Position);
         Target.Rotation = FVector4f(Point.Rotation.X, Point.Rotation.Y, Point.Rotation.Z, Point.Rotation.W);
@@ -287,16 +384,42 @@ void UKasumiSplatAsset::SetImportedPoints(
 
         if (Index % KasumiChunkPointCount == 0)
         {
-            FKasumiSplatChunk& Chunk = Chunks.AddDefaulted_GetRef();
+            FKasumiSplatChunk& Chunk = NewChunks.AddDefaulted_GetRef();
             Chunk.FirstPoint = Index;
-            Chunk.PointCount = FMath::Min(KasumiChunkPointCount, InPoints.Num() - Index);
+            Chunk.PointCount = FMath::Min(KasumiChunkPointCount, PointCount - Index);
             Chunk.LocalBounds.Init();
         }
-        Chunks.Last().LocalBounds += Point.Position;
+        NewChunks.Last().LocalBounds += Point.Position;
+        if (ShouldReport(Index) &&
+            !ReportProgress(EKasumiSplatBuildPhase::Pack, Index, PointCount)) return false;
     }
+    if (!ReportProgress(EKasumiSplatBuildPhase::Pack, PointCount, PointCount)) return false;
 
 #if WITH_EDITORONLY_DATA
-    BuildThumbnailPreview(InPoints, ThumbnailPoints);
+    TArray<FKasumiSplatThumbnailPoint> NewThumbnailPoints;
+    if (!ReportProgress(EKasumiSplatBuildPhase::Thumbnail, 0, 1)) return false;
+    BuildThumbnailPreview(InPoints, NewThumbnailPoints);
+    if (!ReportProgress(EKasumiSplatBuildPhase::Thumbnail, 1, 1)) return false;
+#else
+    if (!ReportProgress(EKasumiSplatBuildPhase::Thumbnail, 1, 1)) return false;
+#endif
+
+    if (!ReportProgress(EKasumiSplatBuildPhase::BulkData, 0, 1)) return false;
+    Modify();
+    PackedPointCount = PointCount;
+    PointBulkDataVersion = 1;
+    SourceEncoding = InEncoding;
+    ImportedUnitsToCentimeters = InUnitsToCentimeters;
+    LocalToSHDirection = InLocalToSHDirection;
+    ResolvedImportProfile = InResolvedImportProfile;
+    HigherOrderSHCoefficientsPerPoint = SHCoefficientsPerPoint;
+    bSpatiallySorted = bShouldSpatiallySort;
+    DataVersion = CurrentDataVersion;
+    ++Revision;
+    LocalBounds = NewLocalBounds;
+    Chunks = MoveTemp(NewChunks);
+#if WITH_EDITORONLY_DATA
+    ThumbnailPoints = MoveTemp(NewThumbnailPoints);
 #endif
 
     PointBulkData.RemoveBulkData();
@@ -322,6 +445,8 @@ void UKasumiSplatAsset::SetImportedPoints(
 
     Points.Reset();
     HigherOrderSH.Reset();
+    ReportProgress(EKasumiSplatBuildPhase::BulkData, 1, 1);
+    return true;
 }
 
 bool UKasumiSplatAsset::LoadPoints(TArray<FKasumiSplatPoint>& OutPoints) const

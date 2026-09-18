@@ -58,6 +58,10 @@ public:
     UPROPERTY(EditAnywhere, Category="Gaussian Splat Import|Streaming")
     bool bSpatiallySortForStreaming = true;
 
+    /** Initial Full Quality Reference value for Actors placed from the imported asset. */
+    UPROPERTY(EditAnywhere, Category="Gaussian Splat Import|Placement")
+    bool bDefaultFullQualityReference = true;
+
     virtual bool ConfigureProperties() override;
     virtual bool FactoryCanImport(const FString& Filename) override;
     virtual UObject* FactoryCreateFile(

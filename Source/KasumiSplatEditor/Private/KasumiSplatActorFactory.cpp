@@ -38,6 +38,7 @@ void UKasumiSplatActorFactory::PostSpawnActor(UObject* Asset, AActor* NewActor)
     SplatActor->SplatComponent->Modify();
     SplatActor->SplatComponent->Asset = SplatAsset;
     SplatActor->SplatComponent->bUseSyntheticFallback = false;
+    SplatActor->SplatComponent->bFullQualityReference = SplatAsset->bDefaultFullQualityReference;
     SplatActor->SplatComponent->ReloadPoints();
 }
 

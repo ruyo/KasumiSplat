@@ -6,6 +6,7 @@
 #include "KasumiSplatStreaming.h"
 #include "Engine/World.h"
 #include "Camera/PlayerCameraManager.h"
+#include "GameFramework/Actor.h"
 #include "GameFramework/PlayerController.h"
 #include "Curves/CurveFloat.h"
 #include "DrawDebugHelpers.h"
@@ -119,12 +120,16 @@ UKasumiSplatComponent::~UKasumiSplatComponent()
 
 int32 UKasumiSplatComponent::GetLoadedPointCount() const
 {
-    return StreamingState->SourcePoints.Num();
+    return StreamingState->TargetSnapshot.Points.IsValid()
+        ? StreamingState->TargetSnapshot.Points->Num()
+        : StreamingState->SourcePoints.Num();
 }
 
 int32 UKasumiSplatComponent::GetLoadedHigherOrderSHValueCount() const
 {
-    return StreamingState->SourceHigherOrderSH.Num();
+    return StreamingState->TargetSnapshot.HigherOrderSH.IsValid()
+        ? StreamingState->TargetSnapshot.HigherOrderSH->Num()
+        : StreamingState->SourceHigherOrderSH.Num();
 }
 
 int32 UKasumiSplatComponent::GetResidentRevision() const
@@ -232,9 +237,33 @@ void UKasumiSplatComponent::ApplyAppearancePreset(EKasumiSplatAppearancePreset P
 
 int64 UKasumiSplatComponent::GetApproximateResidentBytes() const
 {
-    const int64 CpuBytes = StreamingState->SourcePoints.GetAllocatedSize() + StreamingState->SourceHigherOrderSH.GetAllocatedSize();
-    const int64 GpuBytes = int64(StreamingState->SourcePoints.Num()) * 4 * sizeof(FVector4f) +
-        FMath::DivideAndRoundUp<int64>(StreamingState->SourceHigherOrderSH.Num(), 4) * sizeof(FVector4f);
+    int64 CpuBytes = StreamingState->SourcePoints.GetAllocatedSize() + StreamingState->SourceHigherOrderSH.GetAllocatedSize();
+    if (StreamingState->TargetSnapshot.Points.IsValid())
+    {
+        CpuBytes += StreamingState->TargetSnapshot.Points->GetAllocatedSize();
+    }
+    if (StreamingState->RenderSnapshot.Points.IsValid() &&
+        StreamingState->RenderSnapshot.Points != StreamingState->TargetSnapshot.Points)
+    {
+        CpuBytes += StreamingState->RenderSnapshot.Points->GetAllocatedSize();
+    }
+    if (StreamingState->TargetSnapshot.HigherOrderSH.IsValid())
+    {
+        CpuBytes += StreamingState->TargetSnapshot.HigherOrderSH->GetAllocatedSize();
+    }
+    if (StreamingState->RenderSnapshot.HigherOrderSH.IsValid() &&
+        StreamingState->RenderSnapshot.HigherOrderSH != StreamingState->TargetSnapshot.HigherOrderSH)
+    {
+        CpuBytes += StreamingState->RenderSnapshot.HigherOrderSH->GetAllocatedSize();
+    }
+    const int64 RenderPointCount = StreamingState->RenderSnapshot.Points.IsValid()
+        ? StreamingState->RenderSnapshot.Points->Num()
+        : 0;
+    const int64 RenderSHValueCount = StreamingState->RenderSnapshot.HigherOrderSH.IsValid()
+        ? StreamingState->RenderSnapshot.HigherOrderSH->Num()
+        : 0;
+    const int64 GpuBytes = RenderPointCount * 4 * sizeof(FVector4f) +
+        FMath::DivideAndRoundUp<int64>(RenderSHValueCount, 4) * sizeof(FVector4f);
     return CpuBytes + GpuBytes;
 }
 
@@ -362,20 +391,29 @@ void UKasumiSplatComponent::ReloadPoints()
 void UKasumiSplatComponent::RebuildSharedSourcePoints()
 {
     FKasumiSplatResidentSnapshot NewTarget;
-    NewTarget.Points = MakeShared<const TArray<FKasumiSplatPoint>, ESPMode::ThreadSafe>(StreamingState->SourcePoints);
+    const int32 SourcePointCount = StreamingState->SourcePoints.Num();
+    NewTarget.Points = MakeShared<TArray<FKasumiSplatPoint>, ESPMode::ThreadSafe>(MoveTemp(StreamingState->SourcePoints));
     NewTarget.HigherOrderSHCoefficientsPerPoint = Asset ? Asset->GetHigherOrderSHCoefficientsPerPoint() : 0;
     if (NewTarget.HigherOrderSHCoefficientsPerPoint > 0 &&
-        StreamingState->SourceHigherOrderSH.Num() == StreamingState->SourcePoints.Num() * NewTarget.HigherOrderSHCoefficientsPerPoint)
+        StreamingState->SourceHigherOrderSH.Num() == SourcePointCount * NewTarget.HigherOrderSHCoefficientsPerPoint)
     {
-        NewTarget.HigherOrderSH = MakeShared<const TArray<float>, ESPMode::ThreadSafe>(StreamingState->SourceHigherOrderSH);
+        NewTarget.HigherOrderSH = MakeShared<TArray<float>, ESPMode::ThreadSafe>(MoveTemp(StreamingState->SourceHigherOrderSH));
     }
     else
     {
         NewTarget.HigherOrderSHCoefficientsPerPoint = 0;
     }
 
+    const int64 TransitionPointCount = StreamingState->TargetSnapshot.Points.IsValid()
+        ? int64(StreamingState->TargetSnapshot.Points->Num()) + int64(SourcePointCount)
+        : int64(SourcePointCount);
+    const int64 TransitionBudgetBytes = int64(FMath::Max(16, StreamingMemoryBudgetMB)) * 1024 * 1024;
+    const bool bTransitionFitsBudget =
+        (TransitionPointCount + SourcePointCount) *
+            EstimateKasumiSplatResidentBytesPerPoint(NewTarget.HigherOrderSHCoefficientsPerPoint) <= TransitionBudgetBytes;
     const bool bCanTransition = !IsFullQualityEnabled(bFullQualityReference) &&
         bTemporalStabilization && TemporalTransitionDuration > 0.0f &&
+        bTransitionFitsBudget &&
         StreamingState->TargetSnapshot.Points.IsValid() &&
         !StreamingState->TargetSnapshot.Points->IsEmpty() &&
         StreamingState->TargetSnapshot.HigherOrderSHCoefficientsPerPoint ==
@@ -421,6 +459,7 @@ void UKasumiSplatComponent::UpdateStreamingWorkingSet(bool bForce)
     FKasumiSplatStreamingSettings Settings;
     Settings.MemoryBudgetMB = StreamingMemoryBudgetMB;
     Settings.MaxResidentSplats = MaxResidentSplats;
+    Settings.MemoryPressurePolicy = MemoryPressurePolicy;
     Settings.MaxDistance = MaxStreamingDistance;
     Settings.LODStartDistance = LODStartDistance;
     Settings.MaxLODStride = MaxLODStride;
@@ -496,6 +535,7 @@ void UKasumiSplatComponent::PostEditChangeProperty(FPropertyChangedEvent& Proper
         PropertyName == GET_MEMBER_NAME_CHECKED(UKasumiSplatComponent, bFullQualityReference) ||
         PropertyName == GET_MEMBER_NAME_CHECKED(UKasumiSplatComponent, MaxResidentSplats) ||
         PropertyName == GET_MEMBER_NAME_CHECKED(UKasumiSplatComponent, StreamingMemoryBudgetMB) ||
+        PropertyName == GET_MEMBER_NAME_CHECKED(UKasumiSplatComponent, MemoryPressurePolicy) ||
         PropertyName == GET_MEMBER_NAME_CHECKED(UKasumiSplatComponent, MaxStreamingDistance) ||
         PropertyName == GET_MEMBER_NAME_CHECKED(UKasumiSplatComponent, LODStartDistance) ||
         PropertyName == GET_MEMBER_NAME_CHECKED(UKasumiSplatComponent, MaxLODStride);
@@ -528,7 +568,8 @@ void UKasumiSplatComponent::Publish()
 {
     const UWorld* World = GetWorld();
     if (!IsRegistered() || !World || !World->Scene) return;
-    if (!bRenderSplats || !IsVisible())
+    const AActor* OwnerActor = GetOwner();
+    if (!bRenderSplats || !IsVisible() || (OwnerActor && OwnerActor->IsHidden()))
     {
         KasumiSplat::Remove(GetUniqueID());
         return;

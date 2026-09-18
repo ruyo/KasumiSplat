@@ -48,6 +48,8 @@ bool FKasumiSplatActorFactoryTest::RunTest(const FString& Parameters)
     }
 
     UKasumiSplatAsset* Asset = NewObject<UKasumiSplatAsset>(GetTransientPackage(), TEXT("KSA_Garden"));
+    TestTrue(TEXT("Imported assets default placed Actors to Full Quality"), Asset->bDefaultFullQualityReference);
+    Asset->bDefaultFullQualityReference = false;
     UKasumiSplatAsset* PreviewAsset = NewObject<UKasumiSplatAsset>();
     TArray<FKasumiSplatPoint> PreviewSource;
     PreviewSource.AddDefaulted_GetRef().Color = FLinearColor::White;
@@ -87,6 +89,7 @@ bool FKasumiSplatActorFactoryTest::RunTest(const FString& Parameters)
     Factory->PostSpawnActor(Asset, Actor);
     TestTrue(TEXT("Dropped asset is assigned to the component"), Actor->SplatComponent->Asset == Asset);
     TestFalse(TEXT("Imported data disables the synthetic fallback"), Actor->SplatComponent->bUseSyntheticFallback);
+    TestFalse(TEXT("Placed Actor inherits the asset Full Quality preference"), Actor->SplatComponent->bFullQualityReference);
     TestTrue(TEXT("Actor factory exposes the assigned asset"), Factory->GetAssetFromActorInstance(Actor) == Asset);
     TestEqual(TEXT("Placed actor label uses KS without retaining KSA"), Factory->GetDefaultActorLabel(Asset), FString(TEXT("KS_Garden")));
     TestEqual(
