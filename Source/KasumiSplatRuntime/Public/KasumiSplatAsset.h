@@ -48,7 +48,7 @@ class KASUMISPLATRUNTIME_API UKasumiSplatAsset : public UObject
 public:
     UKasumiSplatAsset();
 
-    static constexpr int32 CurrentDataVersion = 7;
+    static constexpr int32 CurrentDataVersion = 8;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="KasumiSplat")
     int32 DataVersion = CurrentDataVersion;

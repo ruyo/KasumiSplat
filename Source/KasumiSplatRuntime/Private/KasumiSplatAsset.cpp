@@ -1,6 +1,7 @@
 #include "KasumiSplatAsset.h"
 
 #include "Async/Async.h"
+#include "Math/Float16.h"
 #include "Misc/ScopeLock.h"
 #include "UObject/StrongObjectPtr.h"
 
@@ -10,7 +11,7 @@
 
 namespace
 {
-    struct FPackedKasumiSplatPoint
+    struct FLegacyPackedKasumiSplatPoint
     {
         FVector3f Position;
         FVector4f Rotation;
@@ -18,6 +19,17 @@ namespace
         FVector4f Color;
         int32 StableId;
     };
+#pragma pack(push, 1)
+    struct FQuantizedKasumiSplatPoint
+    {
+        uint16 Position[3];
+        uint32 Rotation = 0;
+        uint16 LogSigma[3];
+        uint16 Color[4];
+        int32 StableId = 0;
+    };
+#pragma pack(pop)
+    static_assert(sizeof(FQuantizedKasumiSplatPoint) == 28);
 
     constexpr int32 KasumiChunkPointCount = 65536;
 
@@ -117,7 +129,92 @@ namespace
         return ExpandMortonBits(X) | (ExpandMortonBits(Y) << 1) | (ExpandMortonBits(Z) << 2);
     }
 
-    void DecodePackedPoints(const FPackedKasumiSplatPoint* Packed, int32 PointCount, TArray<FKasumiSplatPoint>& OutPoints)
+    uint16 QuantizeRange(double Value, double Minimum, double Extent)
+    {
+        if (Extent <= UE_SMALL_NUMBER) return 0;
+        return uint16(FMath::Clamp(FMath::RoundToInt((Value - Minimum) / Extent * 65535.0), 0, 65535));
+    }
+
+    double DecodeRange(uint16 Value, double Minimum, double Extent)
+    {
+        return Minimum + (double(Value) / 65535.0) * Extent;
+    }
+
+    uint32 EncodeSmallestThreeRotation(const FQuat& Value)
+    {
+        FQuat Rotation = Value.GetNormalized();
+        double Components[4] = {Rotation.X, Rotation.Y, Rotation.Z, Rotation.W};
+        int32 LargestIndex = 0;
+        for (int32 Index = 1; Index < 4; ++Index)
+        {
+            if (FMath::Abs(Components[Index]) > FMath::Abs(Components[LargestIndex])) LargestIndex = Index;
+        }
+        if (Components[LargestIndex] < 0.0)
+        {
+            for (double& Component : Components) Component = -Component;
+        }
+
+        constexpr double Range = 0.7071067811865475244;
+        uint32 Packed = uint32(LargestIndex);
+        int32 StoredIndex = 0;
+        for (int32 Index = 0; Index < 4; ++Index)
+        {
+            if (Index == LargestIndex) continue;
+            const double Normalized = FMath::Clamp((Components[Index] + Range) / (2.0 * Range), 0.0, 1.0);
+            const uint32 Encoded = uint32(FMath::Clamp(FMath::RoundToInt(Normalized * 1023.0), 0, 1023));
+            Packed |= Encoded << (2 + StoredIndex * 10);
+            ++StoredIndex;
+        }
+        return Packed;
+    }
+
+    FQuat DecodeSmallestThreeRotation(uint32 Packed)
+    {
+        constexpr double Range = 0.7071067811865475244;
+        const int32 LargestIndex = int32(Packed & 3u);
+        double Components[4] = {};
+        double SumSquares = 0.0;
+        int32 StoredIndex = 0;
+        for (int32 Index = 0; Index < 4; ++Index)
+        {
+            if (Index == LargestIndex) continue;
+            const uint32 Encoded = (Packed >> (2 + StoredIndex * 10)) & 1023u;
+            Components[Index] = (double(Encoded) / 1023.0) * (2.0 * Range) - Range;
+            SumSquares += Components[Index] * Components[Index];
+            ++StoredIndex;
+        }
+        Components[LargestIndex] = FMath::Sqrt(FMath::Max(0.0, 1.0 - SumSquares));
+        return FQuat(Components[0], Components[1], Components[2], Components[3]).GetNormalized();
+    }
+
+    uint16 EncodeHalf(float Value)
+    {
+        FFloat16 Encoded;
+        Encoded.SetClamped(FMath::IsFinite(Value) ? Value : 0.0f);
+        return Encoded.Encoded;
+    }
+
+    float DecodeHalf(uint16 Value)
+    {
+        FFloat16 Decoded;
+        Decoded.Encoded = Value;
+        return Decoded.GetFloat();
+    }
+
+    int64 PointStrideForVersion(int32 Version)
+    {
+        return Version >= 2 ? sizeof(FQuantizedKasumiSplatPoint) : sizeof(FLegacyPackedKasumiSplatPoint);
+    }
+
+    int64 SHStrideForVersion(int32 Version)
+    {
+        return Version >= 2 ? sizeof(uint16) : sizeof(float);
+    }
+
+    void DecodeLegacyPackedPoints(
+        const FLegacyPackedKasumiSplatPoint* Packed,
+        int32 PointCount,
+        TArray<FKasumiSplatPoint>& OutPoints)
     {
         const int32 OutputOffset = OutPoints.AddUninitialized(PointCount);
         for (int32 Index = 0; Index < PointCount; ++Index)
@@ -128,6 +225,52 @@ namespace
             Point.Sigma = FVector(Packed[Index].Sigma);
             Point.Color = FLinearColor(Packed[Index].Color.X, Packed[Index].Color.Y, Packed[Index].Color.Z, Packed[Index].Color.W);
             Point.StableId = Packed[Index].StableId;
+        }
+    }
+
+    void DecodeQuantizedPoints(
+        const FQuantizedKasumiSplatPoint* Packed,
+        int32 PointCount,
+        const FKasumiSplatChunk& Chunk,
+        TArray<FKasumiSplatPoint>& OutPoints)
+    {
+        const int32 OutputOffset = OutPoints.AddUninitialized(PointCount);
+        for (int32 Index = 0; Index < PointCount; ++Index)
+        {
+            const FQuantizedKasumiSplatPoint& Source = Packed[Index];
+            FKasumiSplatPoint& Point = OutPoints[OutputOffset + Index];
+            Point.Position = FVector(
+                DecodeRange(Source.Position[0], Chunk.QuantizedPositionMin.X, Chunk.QuantizedPositionExtent.X),
+                DecodeRange(Source.Position[1], Chunk.QuantizedPositionMin.Y, Chunk.QuantizedPositionExtent.Y),
+                DecodeRange(Source.Position[2], Chunk.QuantizedPositionMin.Z, Chunk.QuantizedPositionExtent.Z));
+            Point.Rotation = DecodeSmallestThreeRotation(Source.Rotation);
+            Point.Sigma = FVector(
+                FMath::Exp(DecodeRange(Source.LogSigma[0], Chunk.QuantizedLogSigmaMin.X, Chunk.QuantizedLogSigmaExtent.X)),
+                FMath::Exp(DecodeRange(Source.LogSigma[1], Chunk.QuantizedLogSigmaMin.Y, Chunk.QuantizedLogSigmaExtent.Y)),
+                FMath::Exp(DecodeRange(Source.LogSigma[2], Chunk.QuantizedLogSigmaMin.Z, Chunk.QuantizedLogSigmaExtent.Z)));
+            Point.Color = FLinearColor(
+                DecodeHalf(Source.Color[0]),
+                DecodeHalf(Source.Color[1]),
+                DecodeHalf(Source.Color[2]),
+                DecodeHalf(Source.Color[3]));
+            Point.StableId = Source.StableId;
+        }
+    }
+
+    void DecodeSHValues(const void* Data, int32 ValueCount, int32 Version, TArray<float>& OutValues)
+    {
+        if (Version >= 2)
+        {
+            const uint16* Source = static_cast<const uint16*>(Data);
+            const int32 Offset = OutValues.AddUninitialized(ValueCount);
+            for (int32 Index = 0; Index < ValueCount; ++Index)
+            {
+                OutValues[Offset + Index] = DecodeHalf(Source[Index]);
+            }
+        }
+        else
+        {
+            OutValues.Append(static_cast<const float*>(Data), ValueCount);
         }
     }
 
@@ -368,30 +511,58 @@ bool UKasumiSplatAsset::SetImportedPoints(
 
     FBox NewLocalBounds(ForceInit);
     TArray<FKasumiSplatChunk> NewChunks;
-    TArray<FPackedKasumiSplatPoint> Packed;
+    TArray<FQuantizedKasumiSplatPoint> Packed;
     Packed.SetNumUninitialized(PointCount);
     if (!ReportProgress(EKasumiSplatBuildPhase::Pack, 0, PointCount)) return false;
+    for (int32 FirstPoint = 0; FirstPoint < PointCount; FirstPoint += KasumiChunkPointCount)
+    {
+        FKasumiSplatChunk& Chunk = NewChunks.AddDefaulted_GetRef();
+        Chunk.FirstPoint = FirstPoint;
+        Chunk.PointCount = FMath::Min(KasumiChunkPointCount, PointCount - FirstPoint);
+        Chunk.LocalBounds.Init();
+        FBox LogSigmaBounds(ForceInit);
+        for (int32 LocalIndex = 0; LocalIndex < Chunk.PointCount; ++LocalIndex)
+        {
+            const FKasumiSplatPoint& Point = InPoints[FirstPoint + LocalIndex];
+            Chunk.LocalBounds += Point.Position;
+            NewLocalBounds += Point.Position;
+            LogSigmaBounds += FVector(
+                FMath::Loge(FMath::Max(Point.Sigma.X, 1.0e-12)),
+                FMath::Loge(FMath::Max(Point.Sigma.Y, 1.0e-12)),
+                FMath::Loge(FMath::Max(Point.Sigma.Z, 1.0e-12)));
+        }
+        Chunk.QuantizedPositionMin = Chunk.LocalBounds.Min;
+        Chunk.QuantizedPositionExtent = Chunk.LocalBounds.GetSize();
+        Chunk.QuantizedLogSigmaMin = LogSigmaBounds.Min;
+        Chunk.QuantizedLogSigmaExtent = LogSigmaBounds.GetSize();
+    }
     for (int32 Index = 0; Index < PointCount; ++Index)
     {
         const FKasumiSplatPoint& Point = InPoints[Index];
-        NewLocalBounds += Point.Position;
-        FPackedKasumiSplatPoint& Target = Packed[Index];
-        Target.Position = FVector3f(Point.Position);
-        Target.Rotation = FVector4f(Point.Rotation.X, Point.Rotation.Y, Point.Rotation.Z, Point.Rotation.W);
-        Target.Sigma = FVector3f(Point.Sigma);
-        Target.Color = FVector4f(Point.Color.R, Point.Color.G, Point.Color.B, Point.Color.A);
+        const FKasumiSplatChunk& Chunk = NewChunks[Index / KasumiChunkPointCount];
+        FQuantizedKasumiSplatPoint& Target = Packed[Index];
+        Target.Position[0] = QuantizeRange(Point.Position.X, Chunk.QuantizedPositionMin.X, Chunk.QuantizedPositionExtent.X);
+        Target.Position[1] = QuantizeRange(Point.Position.Y, Chunk.QuantizedPositionMin.Y, Chunk.QuantizedPositionExtent.Y);
+        Target.Position[2] = QuantizeRange(Point.Position.Z, Chunk.QuantizedPositionMin.Z, Chunk.QuantizedPositionExtent.Z);
+        Target.Rotation = EncodeSmallestThreeRotation(Point.Rotation);
+        Target.LogSigma[0] = QuantizeRange(
+            FMath::Loge(FMath::Max(Point.Sigma.X, 1.0e-12)),
+            Chunk.QuantizedLogSigmaMin.X,
+            Chunk.QuantizedLogSigmaExtent.X);
+        Target.LogSigma[1] = QuantizeRange(
+            FMath::Loge(FMath::Max(Point.Sigma.Y, 1.0e-12)),
+            Chunk.QuantizedLogSigmaMin.Y,
+            Chunk.QuantizedLogSigmaExtent.Y);
+        Target.LogSigma[2] = QuantizeRange(
+            FMath::Loge(FMath::Max(Point.Sigma.Z, 1.0e-12)),
+            Chunk.QuantizedLogSigmaMin.Z,
+            Chunk.QuantizedLogSigmaExtent.Z);
+        Target.Color[0] = EncodeHalf(Point.Color.R);
+        Target.Color[1] = EncodeHalf(Point.Color.G);
+        Target.Color[2] = EncodeHalf(Point.Color.B);
+        Target.Color[3] = EncodeHalf(Point.Color.A);
         Target.StableId = Point.StableId;
-
-        if (Index % KasumiChunkPointCount == 0)
-        {
-            FKasumiSplatChunk& Chunk = NewChunks.AddDefaulted_GetRef();
-            Chunk.FirstPoint = Index;
-            Chunk.PointCount = FMath::Min(KasumiChunkPointCount, PointCount - Index);
-            Chunk.LocalBounds.Init();
-        }
-        NewChunks.Last().LocalBounds += Point.Position;
-        if (ShouldReport(Index) &&
-            !ReportProgress(EKasumiSplatBuildPhase::Pack, Index, PointCount)) return false;
+        if (ShouldReport(Index) && !ReportProgress(EKasumiSplatBuildPhase::Pack, Index, PointCount)) return false;
     }
     if (!ReportProgress(EKasumiSplatBuildPhase::Pack, PointCount, PointCount)) return false;
 
@@ -407,7 +578,7 @@ bool UKasumiSplatAsset::SetImportedPoints(
     if (!ReportProgress(EKasumiSplatBuildPhase::BulkData, 0, 1)) return false;
     Modify();
     PackedPointCount = PointCount;
-    PointBulkDataVersion = 1;
+    PointBulkDataVersion = 2;
     SourceEncoding = InEncoding;
     ImportedUnitsToCentimeters = InUnitsToCentimeters;
     LocalToSHDirection = InLocalToSHDirection;
@@ -427,19 +598,23 @@ bool UKasumiSplatAsset::SetImportedPoints(
     if (!Packed.IsEmpty())
     {
         void* Destination = PointBulkData.Lock(LOCK_READ_WRITE);
-        Destination = PointBulkData.Realloc(int64(Packed.Num()) * sizeof(FPackedKasumiSplatPoint));
-        FMemory::Memcpy(Destination, Packed.GetData(), int64(Packed.Num()) * sizeof(FPackedKasumiSplatPoint));
+        Destination = PointBulkData.Realloc(int64(Packed.Num()) * sizeof(FQuantizedKasumiSplatPoint));
+        FMemory::Memcpy(Destination, Packed.GetData(), int64(Packed.Num()) * sizeof(FQuantizedKasumiSplatPoint));
         PointBulkData.Unlock();
     }
 
     HigherOrderSHBulkData.RemoveBulkData();
-    HigherOrderSHBulkDataVersion = HigherOrderSHCoefficientsPerPoint > 0 ? 1 : 0;
+    HigherOrderSHBulkDataVersion = HigherOrderSHCoefficientsPerPoint > 0 ? 2 : 0;
     if (!InHigherOrderSH.IsEmpty())
     {
         HigherOrderSHBulkData.SetBulkDataFlags(BULKDATA_Force_NOT_InlinePayload);
         void* Destination = HigherOrderSHBulkData.Lock(LOCK_READ_WRITE);
-        Destination = HigherOrderSHBulkData.Realloc(int64(InHigherOrderSH.Num()) * sizeof(float));
-        FMemory::Memcpy(Destination, InHigherOrderSH.GetData(), int64(InHigherOrderSH.Num()) * sizeof(float));
+        Destination = HigherOrderSHBulkData.Realloc(int64(InHigherOrderSH.Num()) * sizeof(uint16));
+        uint16* PackedSH = static_cast<uint16*>(Destination);
+        for (int32 Index = 0; Index < InHigherOrderSH.Num(); ++Index)
+        {
+            PackedSH[Index] = EncodeHalf(InHigherOrderSH[Index]);
+        }
         HigherOrderSHBulkData.Unlock();
     }
 
@@ -457,21 +632,50 @@ bool UKasumiSplatAsset::LoadPoints(TArray<FKasumiSplatPoint>& OutPoints) const
         return !OutPoints.IsEmpty();
     }
 
-    const int64 ExpectedSize = int64(PackedPointCount) * sizeof(FPackedKasumiSplatPoint);
+    const int64 ExpectedSize = int64(PackedPointCount) * PointStrideForVersion(PointBulkDataVersion);
     if (PointBulkData.GetBulkDataSize() != ExpectedSize)
     {
         return false;
     }
 
     FScopeLock BulkDataLock(&BulkDataCriticalSection);
-    const FPackedKasumiSplatPoint* Packed = static_cast<const FPackedKasumiSplatPoint*>(PointBulkData.LockReadOnly());
+    const void* Packed = PointBulkData.LockReadOnly();
     if (!Packed)
     {
         return false;
     }
     OutPoints.Reset();
     OutPoints.Reserve(PackedPointCount);
-    DecodePackedPoints(Packed, PackedPointCount, OutPoints);
+    if (PointBulkDataVersion >= 2)
+    {
+        const FQuantizedKasumiSplatPoint* Quantized = static_cast<const FQuantizedKasumiSplatPoint*>(Packed);
+        int32 DecodedCount = 0;
+        for (const FKasumiSplatChunk& Chunk : Chunks)
+        {
+            if (Chunk.FirstPoint != DecodedCount || Chunk.PointCount < 0 ||
+                int64(Chunk.FirstPoint) + Chunk.PointCount > PackedPointCount)
+            {
+                PointBulkData.Unlock();
+                OutPoints.Reset();
+                return false;
+            }
+            DecodeQuantizedPoints(Quantized + Chunk.FirstPoint, Chunk.PointCount, Chunk, OutPoints);
+            DecodedCount += Chunk.PointCount;
+        }
+        if (DecodedCount != PackedPointCount)
+        {
+            PointBulkData.Unlock();
+            OutPoints.Reset();
+            return false;
+        }
+    }
+    else
+    {
+        DecodeLegacyPackedPoints(
+            static_cast<const FLegacyPackedKasumiSplatPoint*>(Packed),
+            PackedPointCount,
+            OutPoints);
+    }
     PointBulkData.Unlock();
     return true;
 }
@@ -499,11 +703,12 @@ bool UKasumiSplatAsset::LoadHigherOrderSH(TArray<float>& OutHigherOrderSH) const
         return OutHigherOrderSH.Num() == GetPointCount() * CoefficientsPerPoint;
     }
     const int64 ValueCount = int64(GetPointCount()) * CoefficientsPerPoint;
-    if (HigherOrderSHBulkData.GetBulkDataSize() != ValueCount * sizeof(float)) return false;
+    if (ValueCount > MAX_int32) return false;
+    if (HigherOrderSHBulkData.GetBulkDataSize() != ValueCount * SHStrideForVersion(HigherOrderSHBulkDataVersion)) return false;
     FScopeLock BulkDataLock(&BulkDataCriticalSection);
-    const float* Source = static_cast<const float*>(HigherOrderSHBulkData.LockReadOnly());
+    const void* Source = HigherOrderSHBulkData.LockReadOnly();
     if (!Source) return false;
-    OutHigherOrderSH.Append(Source, ValueCount);
+    DecodeSHValues(Source, int32(ValueCount), HigherOrderSHBulkDataVersion, OutHigherOrderSH);
     HigherOrderSHBulkData.Unlock();
     return true;
 }
@@ -520,39 +725,82 @@ bool UKasumiSplatAsset::LoadPointChunks(
         return LoadPoints(OutPoints);
     }
 
-    FScopeLock BulkDataLock(&BulkDataCriticalSection);
+    const int64 PointStride = PointStrideForVersion(PointBulkDataVersion);
+    if (PointBulkData.GetBulkDataSize() != int64(PackedPointCount) * PointStride)
+    {
+        return false;
+    }
 
-    int32 TotalPoints = 0;
+    int64 TotalPoints64 = 0;
     for (const int32 ChunkIndex : ChunkIndices)
     {
         if (!Chunks.IsValidIndex(ChunkIndex)) return false;
-        TotalPoints += Chunks[ChunkIndex].PointCount;
+        const FKasumiSplatChunk& Chunk = Chunks[ChunkIndex];
+        if (Chunk.FirstPoint < 0 || Chunk.PointCount < 0 ||
+            int64(Chunk.FirstPoint) + Chunk.PointCount > PackedPointCount)
+        {
+            return false;
+        }
+        TotalPoints64 += Chunk.PointCount;
+        if (TotalPoints64 > MAX_int32) return false;
     }
+    const int32 TotalPoints = int32(TotalPoints64);
     OutPoints.Reserve(TotalPoints);
 
-    const FPackedKasumiSplatPoint* Packed = static_cast<const FPackedKasumiSplatPoint*>(PointBulkData.LockReadOnly());
+    const int32 CoefficientsPerPoint = GetHigherOrderSHCoefficientsPerPoint();
+    if (int64(TotalPoints) * CoefficientsPerPoint > MAX_int32) return false;
+    if (OutHigherOrderSH && CoefficientsPerPoint > 0 && HigherOrderSHBulkDataVersion > 0)
+    {
+        const int64 ExpectedSHBytes = int64(PackedPointCount) * CoefficientsPerPoint *
+            SHStrideForVersion(HigherOrderSHBulkDataVersion);
+        if (HigherOrderSHBulkData.GetBulkDataSize() != ExpectedSHBytes) return false;
+    }
+
+    FScopeLock BulkDataLock(&BulkDataCriticalSection);
+
+    const void* Packed = PointBulkData.LockReadOnly();
     if (!Packed) return false;
     for (const int32 ChunkIndex : ChunkIndices)
     {
         const FKasumiSplatChunk& Chunk = Chunks[ChunkIndex];
-        DecodePackedPoints(Packed + Chunk.FirstPoint, Chunk.PointCount, OutPoints);
+        if (PointBulkDataVersion >= 2)
+        {
+            DecodeQuantizedPoints(
+                static_cast<const FQuantizedKasumiSplatPoint*>(Packed) + Chunk.FirstPoint,
+                Chunk.PointCount,
+                Chunk,
+                OutPoints);
+        }
+        else
+        {
+            DecodeLegacyPackedPoints(
+                static_cast<const FLegacyPackedKasumiSplatPoint*>(Packed) + Chunk.FirstPoint,
+                Chunk.PointCount,
+                OutPoints);
+        }
     }
     PointBulkData.Unlock();
 
     if (OutHigherOrderSH)
     {
-        const int32 CoefficientsPerPoint = GetHigherOrderSHCoefficientsPerPoint();
         if (CoefficientsPerPoint > 0)
         {
             if (HigherOrderSHBulkDataVersion > 0)
             {
-                const float* SH = static_cast<const float*>(HigherOrderSHBulkData.LockReadOnly());
+                const void* SH = HigherOrderSHBulkData.LockReadOnly();
                 if (!SH) return false;
                 OutHigherOrderSH->Reserve(TotalPoints * CoefficientsPerPoint);
                 for (const int32 ChunkIndex : ChunkIndices)
                 {
                     const FKasumiSplatChunk& Chunk = Chunks[ChunkIndex];
-                    OutHigherOrderSH->Append(SH + int64(Chunk.FirstPoint) * CoefficientsPerPoint, Chunk.PointCount * CoefficientsPerPoint);
+                    const int64 ValueOffset = int64(Chunk.FirstPoint) * CoefficientsPerPoint;
+                    const uint8* ByteSource = static_cast<const uint8*>(SH) +
+                        ValueOffset * SHStrideForVersion(HigherOrderSHBulkDataVersion);
+                    DecodeSHValues(
+                        ByteSource,
+                        Chunk.PointCount * CoefficientsPerPoint,
+                        HigherOrderSHBulkDataVersion,
+                        *OutHigherOrderSH);
                 }
                 HigherOrderSHBulkData.Unlock();
             }
@@ -583,7 +831,22 @@ void UKasumiSplatAsset::LoadPointChunksAsync(
         if (Chunks.IsValidIndex(ChunkIndex)) ValidIndices.AddUnique(ChunkIndex);
     }
 
-    if (ValidIndices.IsEmpty() || PointBulkDataVersion <= 0)
+    bool bPayloadValid = PointBulkDataVersion > 0 && PackedPointCount > 0 &&
+        PointBulkData.GetBulkDataSize() == int64(PackedPointCount) * PointStrideForVersion(PointBulkDataVersion);
+    for (const int32 ChunkIndex : ValidIndices)
+    {
+        const FKasumiSplatChunk& Chunk = Chunks[ChunkIndex];
+        bPayloadValid &= Chunk.FirstPoint >= 0 && Chunk.PointCount >= 0 &&
+            int64(Chunk.FirstPoint) + Chunk.PointCount <= PackedPointCount;
+    }
+    const int32 CoefficientsPerPoint = GetHigherOrderSHCoefficientsPerPoint();
+    if (bPayloadValid && CoefficientsPerPoint > 0 && HigherOrderSHBulkDataVersion > 0)
+    {
+        bPayloadValid = HigherOrderSHBulkData.GetBulkDataSize() ==
+            int64(PackedPointCount) * CoefficientsPerPoint * SHStrideForVersion(HigherOrderSHBulkDataVersion);
+    }
+
+    if (ValidIndices.IsEmpty() || !bPayloadValid)
     {
         TStrongObjectPtr<UKasumiSplatAsset> StrongAsset(const_cast<UKasumiSplatAsset*>(this));
         Async(EAsyncExecution::ThreadPool,
@@ -606,7 +869,7 @@ void UKasumiSplatAsset::LoadPointChunksAsync(
         MakeShared<FKasumiChunkLoadState, ESPMode::ThreadSafe>(const_cast<UKasumiSplatAsset*>(this));
     State->Callback = MoveTemp(Callback);
     State->Results.SetNum(ValidIndices.Num());
-    State->SHCoefficientsPerPoint = GetHigherOrderSHCoefficientsPerPoint();
+    State->SHCoefficientsPerPoint = CoefficientsPerPoint;
     State->SHResults.SetNum(ValidIndices.Num());
     const bool bStreamSH = State->SHCoefficientsPerPoint > 0 && HigherOrderSHBulkDataVersion > 0;
     State->Remaining = ValidIndices.Num() * (bStreamSH ? 2 : 1);
@@ -632,15 +895,31 @@ void UKasumiSplatAsset::LoadPointChunksAsync(
     for (int32 RequestIndex = 0; RequestIndex < ValidIndices.Num(); ++RequestIndex)
     {
         const FKasumiSplatChunk Chunk = Chunks[ValidIndices[RequestIndex]];
-        const int64 Offset = int64(Chunk.FirstPoint) * sizeof(FPackedKasumiSplatPoint);
-        const int64 Bytes = int64(Chunk.PointCount) * sizeof(FPackedKasumiSplatPoint);
+        const int32 PointVersion = PointBulkDataVersion;
+        const int64 PointStride = PointStrideForVersion(PointVersion);
+        const int64 Offset = int64(Chunk.FirstPoint) * PointStride;
+        const int64 Bytes = int64(Chunk.PointCount) * PointStride;
         FBulkDataIORequestCallBack RequestCallback =
-            [State, RequestIndex, PointCount = Chunk.PointCount](bool bWasCancelled, IBulkDataIORequest* Request)
+            [State, RequestIndex, Chunk, PointVersion](bool bWasCancelled, IBulkDataIORequest* Request)
         {
             uint8* Memory = bWasCancelled ? nullptr : Request->GetReadResults();
             if (Memory)
             {
-                DecodePackedPoints(reinterpret_cast<const FPackedKasumiSplatPoint*>(Memory), PointCount, State->Results[RequestIndex]);
+                if (PointVersion >= 2)
+                {
+                    DecodeQuantizedPoints(
+                        reinterpret_cast<const FQuantizedKasumiSplatPoint*>(Memory),
+                        Chunk.PointCount,
+                        Chunk,
+                        State->Results[RequestIndex]);
+                }
+                else
+                {
+                    DecodeLegacyPackedPoints(
+                        reinterpret_cast<const FLegacyPackedKasumiSplatPoint*>(Memory),
+                        Chunk.PointCount,
+                        State->Results[RequestIndex]);
+                }
                 FMemory::Free(Memory);
             }
             else
@@ -664,16 +943,17 @@ void UKasumiSplatAsset::LoadPointChunksAsync(
 
         if (bStreamSH)
         {
-            const int64 SHOffset = int64(Chunk.FirstPoint) * State->SHCoefficientsPerPoint * sizeof(float);
-            const int64 SHBytes = int64(Chunk.PointCount) * State->SHCoefficientsPerPoint * sizeof(float);
+            const int32 SHVersion = HigherOrderSHBulkDataVersion;
+            const int64 SHStride = SHStrideForVersion(SHVersion);
+            const int64 SHOffset = int64(Chunk.FirstPoint) * State->SHCoefficientsPerPoint * SHStride;
+            const int64 SHBytes = int64(Chunk.PointCount) * State->SHCoefficientsPerPoint * SHStride;
             FBulkDataIORequestCallBack SHRequestCallback =
-                [State, RequestIndex, ValueCount = Chunk.PointCount * State->SHCoefficientsPerPoint](bool bWasCancelled, IBulkDataIORequest* SHRequest)
+                [State, RequestIndex, SHVersion, ValueCount = Chunk.PointCount * State->SHCoefficientsPerPoint](bool bWasCancelled, IBulkDataIORequest* SHRequest)
             {
                 uint8* Memory = bWasCancelled ? nullptr : SHRequest->GetReadResults();
                 if (Memory)
                 {
-                    const float* Values = reinterpret_cast<const float*>(Memory);
-                    State->SHResults[RequestIndex].Append(Values, ValueCount);
+                    DecodeSHValues(Memory, ValueCount, SHVersion, State->SHResults[RequestIndex]);
                     FMemory::Free(Memory);
                 }
                 else

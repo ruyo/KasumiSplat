@@ -4,6 +4,7 @@
 #include "EditorFramework/AssetImportData.h"
 #include "KasumiSplatAsset.h"
 #include "KasumiSplatPlyParser.h"
+#include "KasumiSplatSpzParser.h"
 #include "Async/MappedFileHandle.h"
 #include "HAL/PlatformFileManager.h"
 #include "Misc/FileHelper.h"
@@ -107,6 +108,7 @@ UKasumiSplatImportFactory::UKasumiSplatImportFactory()
     bEditorImport = true;
     SupportedClass = UKasumiSplatAsset::StaticClass();
     Formats.Add(TEXT("ply;3D Gaussian Splat PLY"));
+    Formats.Add(TEXT("spz;Compressed 3D Gaussian Splat SPZ"));
 }
 
 bool UKasumiSplatImportFactory::ConfigureProperties()
@@ -130,7 +132,7 @@ bool UKasumiSplatImportFactory::ConfigureProperties()
 
     TSharedRef<bool> bAccepted = MakeShared<bool>(false);
     TSharedRef<SWindow> Window = SNew(SWindow)
-        .Title(LOCTEXT("WindowTitle", "KasumiSplat PLY Import Options"))
+        .Title(LOCTEXT("WindowTitle", "KasumiSplat Import Options"))
         .SizingRule(ESizingRule::UserSized)
         .ClientSize(FVector2D(560.0f, 620.0f))
         .SupportsMinimize(false)
@@ -201,7 +203,9 @@ bool UKasumiSplatImportFactory::ConfigureProperties()
 
 bool UKasumiSplatImportFactory::FactoryCanImport(const FString& Filename)
 {
-    return FPaths::GetExtension(Filename).Equals(TEXT("ply"), ESearchCase::IgnoreCase);
+    const FString Extension = FPaths::GetExtension(Filename);
+    return Extension.Equals(TEXT("ply"), ESearchCase::IgnoreCase) ||
+        Extension.Equals(TEXT("spz"), ESearchCase::IgnoreCase);
 }
 
 bool UKasumiSplatImportFactory::ImportFile(
@@ -213,7 +217,10 @@ bool UKasumiSplatImportFactory::ImportFile(
     if (bOutOperationCanceled) *bOutOperationCanceled = false;
     FScopedSlowTask SlowTask(100.0f, LOCTEXT("ImportProgress", "Importing Gaussian splats..."));
     if (!FApp::IsUnattended() && !IsRunningCommandlet()) SlowTask.MakeDialog(true);
-    SlowTask.EnterProgressFrame(2.0f, LOCTEXT("PrepareImportProgress", "Preparing PLY import..."));
+    const bool bImportSpz = FPaths::GetExtension(Filename).Equals(TEXT("spz"), ESearchCase::IgnoreCase);
+    SlowTask.EnterProgressFrame(2.0f, bImportSpz
+        ? LOCTEXT("PrepareSpzImportProgress", "Preparing SPZ import...")
+        : LOCTEXT("PreparePlyImportProgress", "Preparing PLY import..."));
     double LastProgress = 0.0;
 
     FKasumiSplatPlyImportOptions Options;
@@ -265,12 +272,11 @@ bool UKasumiSplatImportFactory::ImportFile(
         MappedRegion.Reset(MappedHandle->MapRegion());
         if (MappedRegion)
         {
-            bParsed = FKasumiSplatPlyParser::Parse(
-                static_cast<const uint8*>(MappedRegion->GetMappedPtr()),
-                int64(MappedRegion->GetMappedSize()),
-                Options,
-                Result,
-                Error);
+            const uint8* Data = static_cast<const uint8*>(MappedRegion->GetMappedPtr());
+            const int64 Size = int64(MappedRegion->GetMappedSize());
+            bParsed = bImportSpz
+                ? FKasumiSplatSpzParser::Parse(Data, Size, Options, Result, Error)
+                : FKasumiSplatPlyParser::Parse(Data, Size, Options, Result, Error);
         }
     }
     else
@@ -278,7 +284,9 @@ bool UKasumiSplatImportFactory::ImportFile(
         TArray<uint8> Bytes;
         if (FFileHelper::LoadFileToArray(Bytes, *Filename))
         {
-            bParsed = FKasumiSplatPlyParser::Parse(Bytes, Options, Result, Error);
+            bParsed = bImportSpz
+                ? FKasumiSplatSpzParser::Parse(Bytes, Options, Result, Error)
+                : FKasumiSplatPlyParser::Parse(Bytes, Options, Result, Error);
         }
         else
         {

@@ -319,4 +319,18 @@ struct KASUMISPLATRUNTIME_API FKasumiSplatChunk
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Streaming")
     FBox LocalBounds = FBox(ForceInit);
+
+    /** Per-chunk position range used by point BulkData version 2. */
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Streaming|Quantization")
+    FVector QuantizedPositionMin = FVector::ZeroVector;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Streaming|Quantization")
+    FVector QuantizedPositionExtent = FVector::ZeroVector;
+
+    /** Per-chunk logarithmic sigma range used by point BulkData version 2. */
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Streaming|Quantization")
+    FVector QuantizedLogSigmaMin = FVector::ZeroVector;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Streaming|Quantization")
+    FVector QuantizedLogSigmaExtent = FVector::ZeroVector;
 };

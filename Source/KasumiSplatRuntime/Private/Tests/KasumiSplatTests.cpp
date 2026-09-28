@@ -69,6 +69,9 @@ bool FKasumiSplatPackedStorageTest::RunTest(const FString& Parameters)
     Point.Color = FLinearColor(0.1f, 0.2f, 0.3f, 0.4f);
     TArray<float> SourceSH = {0.25f, -0.5f, 0.75f};
     Asset->SetImportedPoints(MoveTemp(Source), TEXT("Test"), 1.0, MoveTemp(SourceSH), 3);
+    TestEqual(TEXT("Current asset data version is written"), Asset->DataVersion, UKasumiSplatAsset::CurrentDataVersion);
+    TestEqual(TEXT("Quantized point payload is written"), Asset->PointBulkDataVersion, 2);
+    TestEqual(TEXT("FP16 SH payload is written"), Asset->HigherOrderSHBulkDataVersion, 2);
 
     TArray<FKasumiSplatPoint> Loaded;
     TestTrue(TEXT("Packed points load"), Asset->LoadPoints(Loaded));
@@ -89,6 +92,91 @@ bool FKasumiSplatPackedStorageTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("SH bulk data loads"), Asset->LoadHigherOrderSH(LoadedSH));
     TestEqual(TEXT("SH value count"), LoadedSH.Num(), 3);
     if (LoadedSH.Num() == 3) TestTrue(TEXT("SH value survives packing"), FMath::IsNearlyEqual(LoadedSH[1], -0.5f));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FKasumiSplatQuantizedStorageTest, "KasumiSplat.Storage.QuantizedRoundTrip",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FKasumiSplatQuantizedStorageTest::RunTest(const FString& Parameters)
+{
+    UKasumiSplatAsset* Asset = NewObject<UKasumiSplatAsset>();
+    TArray<FKasumiSplatPoint> Source;
+    Source.SetNum(3);
+
+    Source[0].StableId = 101;
+    Source[0].Position = FVector(-1250.25, 0.125, 480.75);
+    Source[0].Rotation = FQuat(FRotator(23.0, -37.0, 11.0));
+    Source[0].Sigma = FVector(0.0005, 0.25, 120.0);
+    Source[0].Color = FLinearColor(-0.25f, 0.125f, 4.5f, 0.875f);
+
+    Source[1].StableId = 202;
+    Source[1].Position = FVector(50.0, -950.5, -10.0);
+    Source[1].Rotation = FQuat(FRotator(-71.0, 14.0, 89.0));
+    Source[1].Sigma = FVector(3.0, 0.003, 14.0);
+    Source[1].Color = FLinearColor(0.3333f, 1.25f, 12.75f, 0.03125f);
+
+    Source[2].StableId = 303;
+    Source[2].Position = FVector(2048.0, 720.25, 1600.0);
+    Source[2].Rotation = FQuat(FRotator(5.0, 178.0, -42.0));
+    Source[2].Sigma = FVector(60.0, 8.0, 0.015);
+    Source[2].Color = FLinearColor(0.9876f, 0.5f, 0.001f, 1.0f);
+
+    const TArray<FKasumiSplatPoint> Expected = Source;
+    TArray<float> SourceSH = {
+        0.12345f, -1.25f, 3.75f,
+        -0.03125f, 0.5f, 7.125f,
+        1.0f, -0.3333f, 0.0005f};
+    const TArray<float> ExpectedSH = SourceSH;
+    TestTrue(TEXT("Quantized asset build succeeds"),
+        Asset->SetImportedPoints(MoveTemp(Source), TEXT("QuantizedTest"), 1.0, MoveTemp(SourceSH), 3));
+
+    TArray<FKasumiSplatPoint> Loaded;
+    TArray<float> LoadedSH;
+    TestTrue(TEXT("Quantized points load"), Asset->LoadPoints(Loaded));
+    TestTrue(TEXT("Quantized SH loads"), Asset->LoadHigherOrderSH(LoadedSH));
+    TestEqual(TEXT("All quantized points are restored"), Loaded.Num(), Expected.Num());
+    TestEqual(TEXT("All FP16 SH values are restored"), LoadedSH.Num(), ExpectedSH.Num());
+
+    for (const FKasumiSplatPoint& Actual : Loaded)
+    {
+        const FKasumiSplatPoint* Original = Expected.FindByPredicate(
+            [&Actual](const FKasumiSplatPoint& Candidate) { return Candidate.StableId == Actual.StableId; });
+        TestNotNull(TEXT("Stable ID identifies a source point"), Original);
+        if (!Original) continue;
+
+        TestTrue(TEXT("Position stays within uint16 chunk precision"),
+            Actual.Position.Equals(Original->Position, 0.06));
+        TestTrue(TEXT("Smallest-three quaternion remains equivalent"),
+            FMath::Abs(Actual.Rotation | Original->Rotation) > 0.99999);
+        for (int32 Axis = 0; Axis < 3; ++Axis)
+        {
+            const double RelativeSigmaError = FMath::Abs(Actual.Sigma[Axis] / Original->Sigma[Axis] - 1.0);
+            TestTrue(TEXT("Log sigma stays within uint16 precision"), RelativeSigmaError < 0.0002);
+        }
+        TestTrue(TEXT("FP16 color stays within half precision"),
+            FMath::Abs(Actual.Color.R - Original->Color.R) < 0.005f &&
+            FMath::Abs(Actual.Color.G - Original->Color.G) < 0.005f &&
+            FMath::Abs(Actual.Color.B - Original->Color.B) < 0.005f &&
+            FMath::Abs(Actual.Color.A - Original->Color.A) < 0.005f);
+    }
+
+    for (int32 PointIndex = 0; PointIndex < Loaded.Num(); ++PointIndex)
+    {
+        const int32 SourcePointIndex = Expected.IndexOfByPredicate(
+            [&Loaded, PointIndex](const FKasumiSplatPoint& Candidate)
+            {
+                return Candidate.StableId == Loaded[PointIndex].StableId;
+            });
+        if (SourcePointIndex == INDEX_NONE) continue;
+        for (int32 CoefficientIndex = 0; CoefficientIndex < 3; ++CoefficientIndex)
+        {
+            TestTrue(TEXT("SH stays paired and within FP16 precision"),
+                FMath::Abs(
+                    LoadedSH[PointIndex * 3 + CoefficientIndex] -
+                    ExpectedSH[SourcePointIndex * 3 + CoefficientIndex]) < 0.005f);
+        }
+    }
     return true;
 }
 
@@ -213,7 +301,7 @@ bool FKasumiSplatBuildProgressTest::RunTest(const FString& Parameters)
     {
         TestTrue(
             TEXT("SH remains paired with its point after in-place reorder"),
-            FMath::IsNearlyEqual(LoadedSH[Index * 3], float(Loaded[Index].StableId) + 0.1f));
+            FMath::IsNearlyEqual(LoadedSH[Index * 3], float(Loaded[Index].StableId) + 0.1f, 0.002f));
     }
 
     TArray<FKasumiSplatPoint> CancelSource;

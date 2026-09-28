@@ -3,7 +3,7 @@
   "Version": 3,
   "VersionName": "0.3.0-beta",
   "FriendlyName": "KasumiSplat",
-  "Description": "Gaussian splat rendering, PLY import, streaming, effects and Niagara integration for UE 5.8.",
+  "Description": "Gaussian splat rendering, PLY and SPZ import, streaming, effects and Niagara integration for UE 5.8.",
   "Category": "Rendering",
   "CreatedBy": "ruyo",
   "CreatedByURL": "https://github.com/ruyo",

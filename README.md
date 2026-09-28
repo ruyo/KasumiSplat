@@ -1,13 +1,13 @@
 # KasumiSplat 0.3 beta
 
-KasumiSplat is a UE 5.8 Gaussian splat renderer with PLY import, streamable assets, deterministic GPU effects, Scene Depth integration, and an optional Niagara bridge.
+KasumiSplat is a UE 5.8 Gaussian splat renderer with PLY and SPZ import, streamable assets, deterministic GPU effects, Scene Depth integration, and an optional Niagara bridge.
 
 ## Implemented
 
 - `KasumiSplatRuntime`: SM6 instanced-quad renderer, GPU culling, 4096-bin, exact global radix, and tiled sorting paths, indirect draw, Scene Depth rejection, and a small-splat depth pre-cull.
-- `KasumiSplatEditor`: ASCII, binary little-endian, and binary big-endian PLY import and reimport. The parser accepts a 64-bit mapped-file size, so files above 2 GB can be parsed when their point and SH arrays fit Unreal's 32-bit `TArray` limits.
+- `KasumiSplatEditor`: ASCII, binary little-endian, and binary big-endian PLY import plus SPZ v1-v4 import and reimport. The PLY parser accepts a 64-bit mapped-file size, so files above 2 GB can be parsed when their point and SH arrays fit Unreal's 32-bit `TArray` limits.
 - `KasumiSplatNiagara`: User Parameter bridge and a Data Interface for CPU Sim and GPU Sim. Resident point data is uploaded to its render-thread proxy only when the component revision changes.
-- Version 7 assets: packed point and higher-order SH `FByteBulkData`, imported SH direction basis and profile metadata, 65,536-point Morton chunks, async range reads, moment-matched Gaussian distance LOD, resident-point and memory budgets, and an editor-only lightweight thumbnail preview.
+- Version 8 assets: 28-byte quantized points and FP16 higher-order SH in streamable `FByteBulkData`, imported SH direction basis and profile metadata, 65,536-point Morton chunks, async range reads, moment-matched Gaussian distance LOD, resident-point and memory budgets, and an editor-only lightweight thumbnail preview. Version 7 point and SH payloads remain readable; reimport writes the less-than-half-size point representation.
 - GPU effects: legacy controls plus four ordered Displace, Tint, Opacity, Scale, or Rotate layers. Sphere and box masks, Stable ID noise, Texture2D masks, and VolumeTexture masks are supported.
 - Animation control: `Interp` style values, `UCurveFloat`, Blueprint setters, Material Parameter Collection inputs, and deterministic normalized Progress suitable for Sequencer scrubbing.
 - View-dependent spherical harmonics through degree 3.
