@@ -98,6 +98,16 @@ enum class EKasumiSplatQuality : uint8
     Custom
 };
 
+/** Maximum spherical-harmonic degree retained in the resident CPU/GPU working set. */
+UENUM(BlueprintType)
+enum class EKasumiSplatSHDegree : uint8
+{
+    DCOnly UMETA(DisplayName="DC Only"),
+    Degree1 UMETA(DisplayName="Degree 1"),
+    Degree2 UMETA(DisplayName="Degree 2"),
+    Degree3 UMETA(DisplayName="Degree 3 (Full)")
+};
+
 UENUM(BlueprintType)
 enum class EKasumiSplatAppearancePreset : uint8
 {

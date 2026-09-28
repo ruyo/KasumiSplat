@@ -166,7 +166,9 @@ FKasumiSplatStreamingSelection BuildKasumiSplatStreamingSelection(
         }
     }
 
-    const int32 SHCount = Asset.GetHigherOrderSHCoefficientsPerPoint();
+    const int32 SHCount = Settings.HigherOrderSHCoefficientsPerPoint >= 0
+        ? Settings.HigherOrderSHCoefficientsPerPoint
+        : Asset.GetHigherOrderSHCoefficientsPerPoint();
     const int64 ApproxBytesPerPoint = EstimateKasumiSplatResidentBytesPerPoint(SHCount);
     const int64 BudgetBytes = int64(FMath::Max(16, Settings.MemoryBudgetMB)) * 1024 * 1024;
     const int32 BudgetPointCount = int32(FMath::Clamp<int64>(
@@ -238,8 +240,64 @@ FKasumiSplatStreamingSelection BuildKasumiSplatStreamingSelection(
 
 int64 EstimateKasumiSplatResidentBytesPerPoint(int32 HigherOrderSHCoefficientsPerPoint)
 {
-    const int64 SHBytes = int64(FMath::Max(0, HigherOrderSHCoefficientsPerPoint)) * sizeof(float);
-    return sizeof(FKasumiSplatPoint) + 4 * sizeof(FVector4f) + 2 * SHBytes;
+    const int64 SHCount = FMath::Max(0, HigherOrderSHCoefficientsPerPoint);
+    const int64 CpuSHBytes = SHCount * sizeof(float);
+    const int64 GpuSHBytes = FMath::DivideAndRoundUp(SHCount, int64(2)) * sizeof(uint32);
+    return sizeof(FKasumiSplatPoint) + 4 * sizeof(FVector4f) + CpuSHBytes + GpuSHBytes;
+}
+
+int32 ResolveKasumiSplatSHCoefficientsPerPoint(
+    EKasumiSplatSHDegree Degree,
+    int32 SourceCoefficientsPerPoint)
+{
+    if (SourceCoefficientsPerPoint <= 0 || SourceCoefficientsPerPoint % 3 != 0)
+    {
+        return 0;
+    }
+    const int32 DesiredPerChannel = Degree == EKasumiSplatSHDegree::DCOnly ? 0
+        : (Degree == EKasumiSplatSHDegree::Degree1 ? 3
+            : (Degree == EKasumiSplatSHDegree::Degree2 ? 8 : 15));
+    return 3 * FMath::Min(SourceCoefficientsPerPoint / 3, DesiredPerChannel);
+}
+
+void ReduceKasumiSplatSHDegree(
+    EKasumiSplatSHDegree Degree,
+    int32 PointCount,
+    int32& InOutCoefficientsPerPoint,
+    TArray<float>& InOutHigherOrderSH)
+{
+    const int32 SourceCount = InOutCoefficientsPerPoint;
+    const int32 TargetCount = ResolveKasumiSplatSHCoefficientsPerPoint(Degree, SourceCount);
+    if (TargetCount <= 0 || PointCount <= 0 ||
+        int64(InOutHigherOrderSH.Num()) != int64(PointCount) * SourceCount)
+    {
+        InOutHigherOrderSH.Reset();
+        InOutCoefficientsPerPoint = 0;
+        return;
+    }
+    if (TargetCount == SourceCount)
+    {
+        return;
+    }
+
+    const int32 SourcePerChannel = SourceCount / 3;
+    const int32 TargetPerChannel = TargetCount / 3;
+    TArray<float> Reduced;
+    Reduced.SetNumUninitialized(PointCount * TargetCount);
+    for (int32 PointIndex = 0; PointIndex < PointCount; ++PointIndex)
+    {
+        const float* Source = InOutHigherOrderSH.GetData() + int64(PointIndex) * SourceCount;
+        float* Target = Reduced.GetData() + int64(PointIndex) * TargetCount;
+        for (int32 Channel = 0; Channel < 3; ++Channel)
+        {
+            FMemory::Memcpy(
+                Target + Channel * TargetPerChannel,
+                Source + Channel * SourcePerChannel,
+                TargetPerChannel * sizeof(float));
+        }
+    }
+    InOutHigherOrderSH = MoveTemp(Reduced);
+    InOutCoefficientsPerPoint = TargetCount;
 }
 
 void ApplyKasumiSplatLOD(

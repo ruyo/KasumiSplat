@@ -24,6 +24,7 @@ struct FKasumiSplatStreamingState
 {
     TArray<FKasumiSplatPoint> SourcePoints;
     TArray<float> SourceHigherOrderSH;
+    int32 SourceHigherOrderSHCoefficientsPerPoint = 0;
     FKasumiSplatResidentSnapshot RenderSnapshot;
     FKasumiSplatResidentSnapshot TargetSnapshot;
     TWeakObjectPtr<UKasumiSplatAsset> LoadedAsset;
@@ -43,6 +44,7 @@ struct FKasumiSplatStreamingSettings
 {
     int32 MemoryBudgetMB = 256;
     int32 MaxResidentSplats = 1000000;
+    int32 HigherOrderSHCoefficientsPerPoint = INDEX_NONE;
     EKasumiSplatMemoryPressurePolicy MemoryPressurePolicy = EKasumiSplatMemoryPressurePolicy::PreserveDetail;
     float MaxDistance = 0.0f;
     float LODStartDistance = 2500.0f;
@@ -63,6 +65,16 @@ FKasumiSplatStreamingSelection BuildKasumiSplatStreamingSelection(
     const FKasumiSplatStreamingSettings& Settings);
 
 int64 EstimateKasumiSplatResidentBytesPerPoint(int32 HigherOrderSHCoefficientsPerPoint);
+
+int32 ResolveKasumiSplatSHCoefficientsPerPoint(
+    EKasumiSplatSHDegree Degree,
+    int32 SourceCoefficientsPerPoint);
+
+void ReduceKasumiSplatSHDegree(
+    EKasumiSplatSHDegree Degree,
+    int32 PointCount,
+    int32& InOutCoefficientsPerPoint,
+    TArray<float>& InOutHigherOrderSH);
 
 int32 ResolveKasumiSplatLODStride(
     double Distance,

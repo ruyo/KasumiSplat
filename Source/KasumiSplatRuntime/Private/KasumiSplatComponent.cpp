@@ -149,6 +149,7 @@ void UKasumiSplatComponent::ResetSyntheticPoints()
 {
     StreamingState->SourcePoints.Reset();
     StreamingState->SourceHigherOrderSH.Reset();
+    StreamingState->SourceHigherOrderSHCoefficientsPerPoint = 0;
     for (int32 Z = 0; Z < 3; ++Z)
     for (int32 Y = 0; Y < 3; ++Y)
     for (int32 X = 0; X < 3; ++X)
@@ -263,7 +264,7 @@ int64 UKasumiSplatComponent::GetApproximateResidentBytes() const
         ? StreamingState->RenderSnapshot.HigherOrderSH->Num()
         : 0;
     const int64 GpuBytes = RenderPointCount * 4 * sizeof(FVector4f) +
-        FMath::DivideAndRoundUp<int64>(RenderSHValueCount, 4) * sizeof(FVector4f);
+        FMath::DivideAndRoundUp<int64>(RenderSHValueCount, 2) * sizeof(uint32);
     return CpuBytes + GpuBytes;
 }
 
@@ -352,6 +353,7 @@ void UKasumiSplatComponent::ReloadPoints()
     }
     StreamingState->SourcePoints.Reset();
     StreamingState->SourceHigherOrderSH.Reset();
+    StreamingState->SourceHigherOrderSHCoefficientsPerPoint = 0;
     StreamingState->SelectionHash = 0;
     StreamingState->bRequestPending = false;
     ++StreamingState->RequestSerial;
@@ -372,6 +374,12 @@ void UKasumiSplatComponent::ReloadPoints()
     if (Asset && Asset->GetPointCount() > 0 && Asset->LoadPoints(StreamingState->SourcePoints))
     {
         Asset->LoadHigherOrderSH(StreamingState->SourceHigherOrderSH);
+        StreamingState->SourceHigherOrderSHCoefficientsPerPoint = Asset->GetHigherOrderSHCoefficientsPerPoint();
+        ReduceKasumiSplatSHDegree(
+            SHDegree,
+            StreamingState->SourcePoints.Num(),
+            StreamingState->SourceHigherOrderSHCoefficientsPerPoint,
+            StreamingState->SourceHigherOrderSH);
         RebuildSharedSourcePoints();
         Publish();
         return;
@@ -393,7 +401,7 @@ void UKasumiSplatComponent::RebuildSharedSourcePoints()
     FKasumiSplatResidentSnapshot NewTarget;
     const int32 SourcePointCount = StreamingState->SourcePoints.Num();
     NewTarget.Points = MakeShared<TArray<FKasumiSplatPoint>, ESPMode::ThreadSafe>(MoveTemp(StreamingState->SourcePoints));
-    NewTarget.HigherOrderSHCoefficientsPerPoint = Asset ? Asset->GetHigherOrderSHCoefficientsPerPoint() : 0;
+    NewTarget.HigherOrderSHCoefficientsPerPoint = StreamingState->SourceHigherOrderSHCoefficientsPerPoint;
     if (NewTarget.HigherOrderSHCoefficientsPerPoint > 0 &&
         StreamingState->SourceHigherOrderSH.Num() == SourcePointCount * NewTarget.HigherOrderSHCoefficientsPerPoint)
     {
@@ -459,6 +467,9 @@ void UKasumiSplatComponent::UpdateStreamingWorkingSet(bool bForce)
     FKasumiSplatStreamingSettings Settings;
     Settings.MemoryBudgetMB = StreamingMemoryBudgetMB;
     Settings.MaxResidentSplats = MaxResidentSplats;
+    Settings.HigherOrderSHCoefficientsPerPoint = ResolveKasumiSplatSHCoefficientsPerPoint(
+        SHDegree,
+        Asset->GetHigherOrderSHCoefficientsPerPoint());
     Settings.MemoryPressurePolicy = MemoryPressurePolicy;
     Settings.MaxDistance = MaxStreamingDistance;
     Settings.LODStartDistance = LODStartDistance;
@@ -478,6 +489,7 @@ void UKasumiSplatComponent::UpdateStreamingWorkingSet(bool bForce)
     {
         StreamingState->SourcePoints.Reset();
         StreamingState->SourceHigherOrderSH.Reset();
+        StreamingState->SourceHigherOrderSHCoefficientsPerPoint = 0;
         RebuildSharedSourcePoints();
         Publish();
         return;
@@ -502,13 +514,20 @@ void UKasumiSplatComponent::UpdateStreamingWorkingSet(bool bForce)
             return;
         }
 
+        const EKasumiSplatSHDegree RequestedSHDegree = Component->SHDegree;
         Async(EAsyncExecution::ThreadPool,
-            [WeakThis, RequestSerial, LODStride, SHCoefficientsPerPoint,
+            [WeakThis, RequestSerial, LODStride, SHCoefficientsPerPoint, RequestedSHDegree,
                 LoadedPoints = MoveTemp(LoadedPoints), LoadedSH = MoveTemp(LoadedSH)]() mutable
         {
-            ApplyKasumiSplatLOD(LODStride, SHCoefficientsPerPoint, LoadedPoints, LoadedSH);
+            int32 ResidentSHCoefficientsPerPoint = SHCoefficientsPerPoint;
+            ReduceKasumiSplatSHDegree(
+                RequestedSHDegree,
+                LoadedPoints.Num(),
+                ResidentSHCoefficientsPerPoint,
+                LoadedSH);
+            ApplyKasumiSplatLOD(LODStride, ResidentSHCoefficientsPerPoint, LoadedPoints, LoadedSH);
             AsyncTask(ENamedThreads::GameThread,
-                [WeakThis, RequestSerial,
+                [WeakThis, RequestSerial, ResidentSHCoefficientsPerPoint,
                     LoadedPoints = MoveTemp(LoadedPoints), LoadedSH = MoveTemp(LoadedSH)]() mutable
             {
                 UKasumiSplatComponent* Component = WeakThis.Get();
@@ -516,6 +535,7 @@ void UKasumiSplatComponent::UpdateStreamingWorkingSet(bool bForce)
                 Component->StreamingState->bRequestPending = false;
                 Component->StreamingState->SourcePoints = MoveTemp(LoadedPoints);
                 Component->StreamingState->SourceHigherOrderSH = MoveTemp(LoadedSH);
+                Component->StreamingState->SourceHigherOrderSHCoefficientsPerPoint = ResidentSHCoefficientsPerPoint;
                 Component->RebuildSharedSourcePoints();
                 Component->Publish();
             });
@@ -533,6 +553,7 @@ void UKasumiSplatComponent::PostEditChangeProperty(FPropertyChangedEvent& Proper
         PropertyName == GET_MEMBER_NAME_CHECKED(UKasumiSplatComponent, bUseSyntheticFallback) ||
         PropertyName == GET_MEMBER_NAME_CHECKED(UKasumiSplatComponent, bEnableChunkStreaming) ||
         PropertyName == GET_MEMBER_NAME_CHECKED(UKasumiSplatComponent, bFullQualityReference) ||
+        PropertyName == GET_MEMBER_NAME_CHECKED(UKasumiSplatComponent, SHDegree) ||
         PropertyName == GET_MEMBER_NAME_CHECKED(UKasumiSplatComponent, MaxResidentSplats) ||
         PropertyName == GET_MEMBER_NAME_CHECKED(UKasumiSplatComponent, StreamingMemoryBudgetMB) ||
         PropertyName == GET_MEMBER_NAME_CHECKED(UKasumiSplatComponent, MemoryPressurePolicy) ||

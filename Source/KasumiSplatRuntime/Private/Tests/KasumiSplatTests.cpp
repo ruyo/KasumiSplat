@@ -253,6 +253,7 @@ bool FKasumiSplatQualityPresetTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("Default tile size"), Component->TileSizePixels, 32);
     TestEqual(TEXT("Default tile overlap budget"), Component->MaxTilesPerSplat, 64);
     TestEqual(TEXT("Default point budget matches High quality"), Component->MaxVisibleSplats, 750000);
+    TestEqual(TEXT("Full SH degree is the default"), Component->SHDegree, EKasumiSplatSHDegree::Degree3);
     TestEqual(TEXT("Needle suppression defaults to a conservative limit"), Component->MaxAnisotropy, 32.0f);
     TestEqual(TEXT("Oversized source splats are limited by default"), Component->MaxSplatSigmaCentimeters, 100.0f);
     Component->ApplyQualityPreset(EKasumiSplatQuality::Low);
@@ -260,6 +261,73 @@ bool FKasumiSplatQualityPresetTest::RunTest(const FString& Parameters)
     Component->ApplyQualityPreset(EKasumiSplatQuality::Cinematic);
     TestEqual(TEXT("Cinematic point budget"), Component->MaxVisibleSplats, 2000000);
     TestTrue(TEXT("Cinematic preserves small splats"), Component->MinProjectedRadiusPixels == 0.0f);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FKasumiSplatSHDegreeReductionTest, "KasumiSplat.Streaming.SHDegreeReduction",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FKasumiSplatSHDegreeReductionTest::RunTest(const FString& Parameters)
+{
+    constexpr int32 PointCount = 2;
+    constexpr int32 FullCoefficientCount = 45;
+    TArray<float> FullSH;
+    FullSH.SetNumUninitialized(PointCount * FullCoefficientCount);
+    for (int32 PointIndex = 0; PointIndex < PointCount; ++PointIndex)
+    {
+        for (int32 Channel = 0; Channel < 3; ++Channel)
+        {
+            for (int32 Coefficient = 0; Coefficient < 15; ++Coefficient)
+            {
+                FullSH[PointIndex * FullCoefficientCount + Channel * 15 + Coefficient] =
+                    float(PointIndex * 1000 + (Channel + 1) * 100 + Coefficient);
+            }
+        }
+    }
+
+    TestEqual(TEXT("DC only has no higher-order coefficients"),
+        ResolveKasumiSplatSHCoefficientsPerPoint(EKasumiSplatSHDegree::DCOnly, FullCoefficientCount), 0);
+    TestEqual(TEXT("Degree 1 retains nine coefficients"),
+        ResolveKasumiSplatSHCoefficientsPerPoint(EKasumiSplatSHDegree::Degree1, FullCoefficientCount), 9);
+    TestEqual(TEXT("Degree 2 retains twenty-four coefficients"),
+        ResolveKasumiSplatSHCoefficientsPerPoint(EKasumiSplatSHDegree::Degree2, FullCoefficientCount), 24);
+    TestEqual(TEXT("Degree 3 retains all coefficients"),
+        ResolveKasumiSplatSHCoefficientsPerPoint(EKasumiSplatSHDegree::Degree3, FullCoefficientCount), 45);
+    TestEqual(TEXT("A lower source degree is not expanded"),
+        ResolveKasumiSplatSHCoefficientsPerPoint(EKasumiSplatSHDegree::Degree3, 9), 9);
+
+    TArray<float> Degree1SH = FullSH;
+    int32 Degree1Count = FullCoefficientCount;
+    ReduceKasumiSplatSHDegree(EKasumiSplatSHDegree::Degree1, PointCount, Degree1Count, Degree1SH);
+    TestEqual(TEXT("Degree 1 output coefficient count"), Degree1Count, 9);
+    TestEqual(TEXT("Degree 1 output value count"), Degree1SH.Num(), PointCount * Degree1Count);
+    TestEqual(TEXT("Degree 1 preserves the first red coefficient"), Degree1SH[0], 100.0f);
+    TestEqual(TEXT("Degree 1 preserves the third red coefficient"), Degree1SH[2], 102.0f);
+    TestEqual(TEXT("Degree 1 preserves the first green coefficient"), Degree1SH[3], 200.0f);
+    TestEqual(TEXT("Degree 1 preserves the first blue coefficient"), Degree1SH[6], 300.0f);
+    TestEqual(TEXT("Degree 1 preserves point boundaries"), Degree1SH[9], 1100.0f);
+
+    TArray<float> Degree2SH = FullSH;
+    int32 Degree2Count = FullCoefficientCount;
+    ReduceKasumiSplatSHDegree(EKasumiSplatSHDegree::Degree2, PointCount, Degree2Count, Degree2SH);
+    TestEqual(TEXT("Degree 2 output coefficient count"), Degree2Count, 24);
+    TestEqual(TEXT("Degree 2 output value count"), Degree2SH.Num(), PointCount * Degree2Count);
+    TestEqual(TEXT("Degree 2 preserves the eighth green coefficient"), Degree2SH[15], 207.0f);
+
+    TArray<float> DCOnlySH = FullSH;
+    int32 DCOnlyCount = FullCoefficientCount;
+    ReduceKasumiSplatSHDegree(EKasumiSplatSHDegree::DCOnly, PointCount, DCOnlyCount, DCOnlySH);
+    TestEqual(TEXT("DC only output coefficient count"), DCOnlyCount, 0);
+    TestTrue(TEXT("DC only releases higher-order SH storage"), DCOnlySH.IsEmpty());
+
+    const int64 BaseBytes = EstimateKasumiSplatResidentBytesPerPoint(0);
+    TestEqual(TEXT("FP16 GPU packing uses two coefficients per word"),
+        EstimateKasumiSplatResidentBytesPerPoint(45) - BaseBytes,
+        int64(45 * sizeof(float) + 23 * sizeof(uint32)));
+    TestTrue(TEXT("Degree 1 uses less estimated memory than Degree 2"),
+        EstimateKasumiSplatResidentBytesPerPoint(9) < EstimateKasumiSplatResidentBytesPerPoint(24));
+    TestTrue(TEXT("Degree 2 uses less estimated memory than Degree 3"),
+        EstimateKasumiSplatResidentBytesPerPoint(24) < EstimateKasumiSplatResidentBytesPerPoint(45));
     return true;
 }
 

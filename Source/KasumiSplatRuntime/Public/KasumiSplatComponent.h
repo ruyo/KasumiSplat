@@ -41,6 +41,10 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Quality")
     bool bFullQualityReference = true;
 
+    /** Limits resident view-dependent color coefficients. DC Only uses the imported base color without higher-order SH. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Quality")
+    EKasumiSplatSHDegree SHDegree = EKasumiSplatSHDegree::Degree3;
+
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Quality", meta=(EditCondition="!bFullQualityReference"))
     EKasumiSplatQuality QualityPreset = EKasumiSplatQuality::High;
 

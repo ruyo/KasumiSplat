@@ -140,7 +140,7 @@ public:
 
     BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
         SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, PointData)
-        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, SHData)
+        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, SHData)
         SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, VisibleIndices)
         SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, TileKeys)
         SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
@@ -168,6 +168,7 @@ public:
         SHADER_PARAMETER(uint32, TileDepthBits)
         SHADER_PARAMETER(uint32, Seed)
         SHADER_PARAMETER(uint32, HigherOrderSHCoefficientsPerPoint)
+        SHADER_PARAMETER(uint32, SHWordsPerPoint)
         SHADER_PARAMETER(uint32, ResetVelocityHistory)
         SHADER_PARAMETER_ARRAY(FVector4f, LayerTypeWeight, [KasumiMaxEffectLayers])
         SHADER_PARAMETER_ARRAY(FVector4f, LayerMaskCenterFeather, [KasumiMaxEffectLayers])

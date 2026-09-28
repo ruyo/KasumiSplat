@@ -829,6 +829,9 @@ public:
             Parameters->VS.TileDepthBits = TileDepthBits;
             Parameters->VS.Seed = uint32(Entry->Packet.Style.Seed);
             Parameters->VS.HigherOrderSHCoefficientsPerPoint = Entry->Packet.HigherOrderSHCoefficientsPerPoint;
+            Parameters->VS.SHWordsPerPoint = FMath::DivideAndRoundUp(
+                Entry->Packet.HigherOrderSHCoefficientsPerPoint,
+                2u);
             Parameters->VS.LayerCount = LayerCount;
             FMemory::Memcpy(Parameters->VS.LayerTypeWeight.GetData(), LayerTypeWeight, sizeof(LayerTypeWeight));
             FMemory::Memcpy(Parameters->VS.LayerMaskCenterFeather.GetData(), LayerMaskCenterFeather, sizeof(LayerMaskCenterFeather));
@@ -978,7 +981,11 @@ namespace KasumiSplat
                     Entry = MakeShared<FKasumiSplatRenderEntry, ESPMode::ThreadSafe>();
                     Entry->ComponentId = Id;
                 }
-                if (Entry->Packet.Points.Get() != Packet.Points.Get())
+                const bool bPointsChanged = Entry->Packet.Points.Get() != Packet.Points.Get();
+                const bool bSHChanged =
+                    Entry->Packet.HigherOrderSH.Get() != Packet.HigherOrderSH.Get() ||
+                    Entry->Packet.HigherOrderSHCoefficientsPerPoint != Packet.HigherOrderSHCoefficientsPerPoint;
+                if (bPointsChanged)
                 {
                     Entry->PointBuffer.SafeRelease();
                     Entry->SHBuffer.SafeRelease();
@@ -986,6 +993,10 @@ namespace KasumiSplat
                     Entry->bTiledOverflowRecoveryProbePending = false;
                     Entry->bDelayedTiledFallbackActive = false;
                     Entry->DelayedTiledFallbackFramesRemaining = 0u;
+                }
+                else if (bSHChanged)
+                {
+                    Entry->SHBuffer.SafeRelease();
                 }
                 const bool bNewFrame = Entry->LastPublishFrame != Packet.FrameNumber;
                 if (!Entry->bVelocityHistoryValid || Packet.bResetVelocityHistory)

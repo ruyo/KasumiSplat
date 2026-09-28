@@ -7,7 +7,7 @@
 #define KASUMI_MIN_EFFECTIVE_ALPHA 0.0001
 
 StructuredBuffer<float4> PointData;
-StructuredBuffer<float4> SHData;
+StructuredBuffer<uint> SHData;
 Buffer<uint> VisibilityBuckets;
 Buffer<uint> ExactValues;
 Buffer<uint> BucketCounts;
@@ -65,6 +65,7 @@ uint TilePairCapacity;
 uint TileDepthBits;
 uint4 TileConfig;
 uint HigherOrderSHCoefficientsPerPoint;
+uint SHWordsPerPoint;
 uint ResetVelocityHistory;
 float3 ViewLocalPosition;
 float4 LayerTypeWeight[4];
@@ -133,8 +134,9 @@ float ExternalMaskWeight(float3 LocalPosition)
 
 float LoadSHValue(uint PointIndex, uint FlatCoefficientIndex)
 {
-    const uint FlatIndex = PointIndex * 48u + FlatCoefficientIndex;
-    return SHData[FlatIndex / 4u][FlatIndex % 4u];
+    const uint PackedValue = SHData[PointIndex * SHWordsPerPoint + FlatCoefficientIndex / 2u];
+    const uint EncodedHalf = (PackedValue >> ((FlatCoefficientIndex & 1u) * 16u)) & 0xffffu;
+    return f16tof32(EncodedHalf);
 }
 
 float ApplyOpacityDensity(float Alpha)
