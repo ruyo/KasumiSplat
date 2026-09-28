@@ -7,3 +7,6 @@ IMPLEMENT_GLOBAL_SHADER(FKasumiSplatScatterCS, "/Plugin/KasumiSplat/Private/Kasu
 IMPLEMENT_GLOBAL_SHADER(FKasumiSplatInstanceVS, "/Plugin/KasumiSplat/Private/KasumiSplatProbe.usf", "MainVS", SF_Vertex);
 IMPLEMENT_GLOBAL_SHADER(FKasumiSplatInstancePS, "/Plugin/KasumiSplat/Private/KasumiSplatProbe.usf", "MainPS", SF_Pixel);
 IMPLEMENT_GLOBAL_SHADER(FKasumiSplatVelocityPS, "/Plugin/KasumiSplat/Private/KasumiSplatProbe.usf", "VelocityPS", SF_Pixel);
+IMPLEMENT_GLOBAL_SHADER(FKasumiSplatGroupVS, "/Plugin/KasumiSplat/Private/KasumiSplatProbe.usf", "GroupVS", SF_Vertex);
+IMPLEMENT_GLOBAL_SHADER(FKasumiSplatGroupPS, "/Plugin/KasumiSplat/Private/KasumiSplatProbe.usf", "GroupPS", SF_Pixel);
+IMPLEMENT_GLOBAL_SHADER(FKasumiSplatGroupVelocityPS, "/Plugin/KasumiSplat/Private/KasumiSplatProbe.usf", "GroupVelocityPS", SF_Pixel);

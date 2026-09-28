@@ -12,8 +12,27 @@
 #include "Misc/App.h"
 #include "Misc/AutomationTest.h"
 #include "ThumbnailRendering/ThumbnailManager.h"
+#include "Tests/AutomationCommon.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
+
+DEFINE_LATENT_AUTOMATION_COMMAND_TWO_PARAMETER(
+    FCleanupKasumiSceneGroupActors,
+    TWeakObjectPtr<AKasumiSplatActor>, FirstActor,
+    TWeakObjectPtr<AKasumiSplatActor>, SecondActor);
+
+bool FCleanupKasumiSceneGroupActors::Update()
+{
+    if (FirstActor.IsValid())
+    {
+        FirstActor->GetWorld()->DestroyActor(FirstActor.Get(), false, false);
+    }
+    if (SecondActor.IsValid())
+    {
+        SecondActor->GetWorld()->DestroyActor(SecondActor.Get(), false, false);
+    }
+    return true;
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FKasumiSplatActorFactoryTest,
@@ -98,6 +117,57 @@ bool FKasumiSplatActorFactoryTest::RunTest(const FString& Parameters)
         FString(TEXT("KS_Garden")));
 
     World->DestroyActor(Actor, false, false);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FKasumiSplatSceneGroupRenderTest,
+    "KasumiSplat.Editor.SceneGroupRenderPath",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FKasumiSplatSceneGroupRenderTest::RunTest(const FString& Parameters)
+{
+    UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+    TestNotNull(TEXT("Editor world is available for grouped rendering"), World);
+    if (!World)
+    {
+        return false;
+    }
+
+    FActorSpawnParameters SpawnParameters;
+    SpawnParameters.ObjectFlags |= RF_Transient;
+    SpawnParameters.bTemporaryEditorActor = true;
+    AKasumiSplatActor* FirstActor = World->SpawnActor<AKasumiSplatActor>(
+        FVector::ZeroVector,
+        FRotator::ZeroRotator,
+        SpawnParameters);
+    AKasumiSplatActor* SecondActor = World->SpawnActor<AKasumiSplatActor>(
+        FVector(25.0, 0.0, 0.0),
+        FRotator::ZeroRotator,
+        SpawnParameters);
+    TestNotNull(TEXT("First grouped actor can be spawned"), FirstActor);
+    TestNotNull(TEXT("Second grouped actor can be spawned"), SecondActor);
+    if (!FirstActor || !SecondActor)
+    {
+        if (FirstActor) World->DestroyActor(FirstActor, false, false);
+        if (SecondActor) World->DestroyActor(SecondActor, false, false);
+        return false;
+    }
+
+    for (AKasumiSplatActor* Actor : {FirstActor, SecondActor})
+    {
+        Actor->SplatComponent->SortScope = EKasumiSplatSortScope::SceneGroup;
+        Actor->SplatComponent->GlobalSortGroup = 17;
+        Actor->SplatComponent->SortMode = EKasumiSplatSortMode::GlobalRadix;
+        Actor->SplatComponent->ReregisterComponent();
+    }
+    TestEqual(TEXT("Scene group scope is retained"),
+        FirstActor->SplatComponent->SortScope,
+        EKasumiSplatSortScope::SceneGroup);
+    TestEqual(TEXT("Scene group id is retained"), FirstActor->SplatComponent->GlobalSortGroup, 17);
+
+    ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.25f));
+    ADD_LATENT_AUTOMATION_COMMAND(FCleanupKasumiSceneGroupActors(FirstActor, SecondActor));
     return true;
 }
 

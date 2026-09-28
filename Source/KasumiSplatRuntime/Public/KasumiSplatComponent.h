@@ -52,6 +52,14 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering")
     EKasumiSplatSortMode SortMode = EKasumiSplatSortMode::Auto;
 
+    /** Scene Group globally sorts splats from every component with the same non-zero group id. A one-component group uses the Per Actor fast path; multi-component groups use transient GPU records in addition to resident buffers. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering")
+    EKasumiSplatSortScope SortScope = EKasumiSplatSortScope::PerActor;
+
+    /** Components in the same scene and with the same id share one Global Radix sort when Scene Group is selected. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering", meta=(ClampMin="1", UIMin="1", EditCondition="SortScope == EKasumiSplatSortScope::SceneGroup"))
+    int32 GlobalSortGroup = 1;
+
     /** Screen-tile edge length used by Tiled sorting. Values are rounded to a multiple of 8. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering|Tiled", meta=(ClampMin="16", ClampMax="128", UIMin="16", UIMax="128", EditCondition="SortMode == EKasumiSplatSortMode::Auto || SortMode == EKasumiSplatSortMode::Tiled"))
     int32 TileSizePixels = 32;

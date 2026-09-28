@@ -15,8 +15,12 @@ public:
 
     BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
         SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, PointData)
+        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, SHData)
+        SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
         SHADER_PARAMETER(FMatrix44f, LocalToWorld)
         SHADER_PARAMETER(FMatrix44f, WorldToClip)
+        SHADER_PARAMETER(FMatrix44f, PreviousLocalToWorld)
+        SHADER_PARAMETER(FMatrix44f, LocalToSHDirection)
         SHADER_PARAMETER(FVector2f, ViewSize)
         SHADER_PARAMETER(FVector4f, Tint)
         SHADER_PARAMETER(FVector4f, StyleValues)
@@ -47,6 +51,13 @@ public:
         SHADER_PARAMETER_SAMPLER(SamplerState, ExternalMaskSampler)
         SHADER_PARAMETER(FVector4f, ExternalMaskCenterMode)
         SHADER_PARAMETER(FVector4f, ExternalMaskExtentValues)
+        SHADER_PARAMETER(FVector3f, ViewLocalPosition)
+        SHADER_PARAMETER(uint32, HigherOrderSHCoefficientsPerPoint)
+        SHADER_PARAMETER(uint32, SHWordsPerPoint)
+        SHADER_PARAMETER(uint32, ResetVelocityHistory)
+        SHADER_PARAMETER(uint32, WriteGroupRecords)
+        SHADER_PARAMETER(uint32, GroupOutputBase)
+        SHADER_PARAMETER(uint32, VelocityEnabled)
         SHADER_PARAMETER(uint32, Seed)
         SHADER_PARAMETER(uint32, PointCount)
         SHADER_PARAMETER(uint32, SourcePointCount)
@@ -66,6 +77,58 @@ public:
         SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWTileOverflow)
         SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWTileKeys)
         SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWTileValues)
+        SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, RWGroupRecordData)
+    END_SHADER_PARAMETER_STRUCT()
+
+    static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+    {
+        return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM6);
+    }
+};
+
+class FKasumiSplatGroupVS : public FGlobalShader
+{
+public:
+    DECLARE_GLOBAL_SHADER(FKasumiSplatGroupVS);
+    SHADER_USE_PARAMETER_STRUCT(FKasumiSplatGroupVS, FGlobalShader);
+
+    BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, GroupRecordData)
+        SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, VisibleIndices)
+        SHADER_PARAMETER(FVector2f, ViewSize)
+    END_SHADER_PARAMETER_STRUCT()
+
+    static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+    {
+        return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM6);
+    }
+};
+
+class FKasumiSplatGroupPS : public FGlobalShader
+{
+public:
+    DECLARE_GLOBAL_SHADER(FKasumiSplatGroupPS);
+    SHADER_USE_PARAMETER_STRUCT(FKasumiSplatGroupPS, FGlobalShader);
+
+    BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+        SHADER_PARAMETER_STRUCT_INCLUDE(FSceneTextureShaderParameters, SceneTextures)
+    END_SHADER_PARAMETER_STRUCT()
+
+    static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+    {
+        return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM6);
+    }
+};
+
+class FKasumiSplatGroupVelocityPS : public FGlobalShader
+{
+public:
+    DECLARE_GLOBAL_SHADER(FKasumiSplatGroupVelocityPS);
+    SHADER_USE_PARAMETER_STRUCT(FKasumiSplatGroupVelocityPS, FGlobalShader);
+
+    BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+        SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+        SHADER_PARAMETER_RDG_TEXTURE(Texture2D, VelocitySceneDepthTexture)
     END_SHADER_PARAMETER_STRUCT()
 
     static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)

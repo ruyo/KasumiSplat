@@ -25,6 +25,8 @@ struct FKasumiSplatPacket
     FKasumiSplatAppearance Appearance;
     TArray<FKasumiSplatEffectLayer> EffectLayers;
     EKasumiSplatSortMode SortMode = EKasumiSplatSortMode::Auto;
+    EKasumiSplatSortScope SortScope = EKasumiSplatSortScope::PerActor;
+    int32 GlobalSortGroup = 0;
     uint32 TileSizePixels = 32;
     uint32 MaxTilesPerSplat = 64;
     uint32 TiledPairBudgetMB = 256;

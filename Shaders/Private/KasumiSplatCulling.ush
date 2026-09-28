@@ -178,6 +178,44 @@ void CullCS(uint3 DispatchThreadId : SV_DispatchThreadID)
             }
         }
     }
+    const uint OutputIndex = GroupOutputBase + SampleIndex;
+    if (WriteGroupRecords != 0u && bVisible)
+    {
+        float4 SourceColor = PointData[PointIndex * 4u + 3u];
+        SourceColor.rgb = ApplyAppearanceColor(EvaluateHigherOrderSH(
+            PointIndex,
+            SourceColor.rgb,
+            normalize(mul(
+                float4(normalize(TransformedLocalPosition - ViewLocalPosition + float3(1.0e-6, 0.0, 0.0)), 0.0),
+                LocalToSHDirection).xyz)));
+        const float3 EffectColor = lerp(1.0.xxx, EffectTint.rgb, Weight);
+        const float3 FinalColor =
+            SourceColor.rgb * Tint.rgb * EffectColor * LayerColor.rgb * View.PreExposure;
+        const float3 CurrentWorldPosition = mul(float4(TransformedLocalPosition, 1.0), LocalToWorld).xyz;
+        const float4 CurrentVelocityClip = mul(
+            float4(CurrentWorldPosition + DFHackToFloat(ResolvedView.PreViewTranslation), 1.0),
+            ResolvedView.TranslatedWorldToClip);
+        const float3 PreviousWorldPosition = mul(
+            float4(TransformedLocalPosition, 1.0),
+            PreviousLocalToWorld).xyz;
+        const float4 PreviousVelocityClip = ResetVelocityHistory != 0u
+            ? CurrentVelocityClip
+            : mul(
+                float4(PreviousWorldPosition + DFHackToFloat(ResolvedView.PrevPreViewTranslation), 1.0),
+                ResolvedView.PrevTranslatedWorldToClip);
+        const uint RecordBase = OutputIndex * 6u;
+        RWGroupRecordData[RecordBase + 0u] = CenterClip;
+        RWGroupRecordData[RecordBase + 1u] = float4(Covariance, ComputeDeviceDepthRadius(
+            CenterClip, Rotation, SigmaAndAlpha, Weight, LayerScale));
+        RWGroupRecordData[RecordBase + 2u] = float4(FinalColor, EffectiveAlpha);
+        RWGroupRecordData[RecordBase + 3u] = CurrentVelocityClip;
+        RWGroupRecordData[RecordBase + 4u] = PreviousVelocityClip;
+        RWGroupRecordData[RecordBase + 5u] = float4(
+            ProjectedRadiusRange.y,
+            SceneDepthBias,
+            float(UseSceneDepth),
+            float(VelocityEnabled));
+    }
     if (SortPath == 0u)
     {
         RWVisibilityBuckets[SampleIndex] = Bucket;
@@ -185,8 +223,8 @@ void CullCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     }
     else if (SortPath == 1u || EnableTiledFallback != 0u)
     {
-        RWExactKeys[SampleIndex] = ExactKey;
-        RWExactValues[SampleIndex] = PointIndex;
+        RWExactKeys[OutputIndex] = ExactKey;
+        RWExactValues[OutputIndex] = WriteGroupRecords != 0u ? OutputIndex : PointIndex;
     }
     if (SampleIndex == 0u)
     {
@@ -259,4 +297,5 @@ struct FKasumiVertexOutput
     nointerpolation float DepthRadius : TEXCOORD3;
     nointerpolation float4 CurrentCenterClip : TEXCOORD4;
     nointerpolation float4 PreviousCenterClip : TEXCOORD5;
+    nointerpolation float4 ComponentSettings : TEXCOORD6;
 };

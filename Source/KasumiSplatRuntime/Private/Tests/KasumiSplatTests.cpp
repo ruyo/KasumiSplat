@@ -250,6 +250,8 @@ bool FKasumiSplatQualityPresetTest::RunTest(const FString& Parameters)
 {
     UKasumiSplatComponent* Component = NewObject<UKasumiSplatComponent>();
     TestEqual(TEXT("Automatic GPU sorting is the default"), Component->SortMode, EKasumiSplatSortMode::Auto);
+    TestEqual(TEXT("Per Actor sorting is the default scope"), Component->SortScope, EKasumiSplatSortScope::PerActor);
+    TestEqual(TEXT("Default scene group id"), Component->GlobalSortGroup, 1);
     TestEqual(TEXT("Default tile size"), Component->TileSizePixels, 32);
     TestEqual(TEXT("Default tile overlap budget"), Component->MaxTilesPerSplat, 64);
     TestEqual(TEXT("Default point budget matches High quality"), Component->MaxVisibleSplats, 750000);

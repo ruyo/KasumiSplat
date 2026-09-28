@@ -54,6 +54,7 @@ FKasumiVertexOutput MainVS(uint VertexId : SV_VertexID, uint InstanceId : SV_Ins
         : mul(
             float4(PreviousWorldPosition + DFHackToFloat(ResolvedView.PrevPreViewTranslation), 1.0),
             ResolvedView.PrevTranslatedWorldToClip);
+    Output.ComponentSettings = 0.0;
 
     CenterClip.xy += float2(
         2.0 * DeltaPixels.x / ViewSize.x,
@@ -68,6 +69,36 @@ FKasumiVertexOutput MainVS(uint VertexId : SV_VertexID, uint InstanceId : SV_Ins
         SourceColor.rgb * Tint.rgb * EffectColor * LayerColor.rgb * View.PreExposure,
         ApplyOpacityDensity(SigmaAndAlpha.w) * TransitionOpacity(PointIndex) * StyleValues.y * Tint.a *
             EffectAlpha * EffectOpacity * LayerColor.a * FilteredCovariance.w);
+    return Output;
+}
+
+FKasumiVertexOutput GroupVS(uint VertexId : SV_VertexID, uint InstanceId : SV_InstanceID)
+{
+    FKasumiVertexOutput Output;
+    const uint RecordIndex = VisibleIndices[InstanceId];
+    const uint RecordBase = RecordIndex * 6u;
+    float4 CenterClip = GroupRecordData[RecordBase + 0u];
+    const float4 CovarianceDepth = GroupRecordData[RecordBase + 1u];
+    const float4 RecordColor = GroupRecordData[RecordBase + 2u];
+    const float4 RecordSettings = GroupRecordData[RecordBase + 5u];
+    const float3 Covariance = CovarianceDepth.xyz;
+    const float Determinant = Covariance.x * Covariance.z - Covariance.y * Covariance.y;
+    const float SafeDeterminant = max(Determinant, 1.0e-8);
+    const float RadiusX = min(3.0 * sqrt(max(Covariance.x, 0.0)), RecordSettings.x);
+    const float RadiusY = min(3.0 * sqrt(max(Covariance.z, 0.0)), RecordSettings.x);
+    const float2 DeltaPixels = QuadCorner(VertexId) * float2(RadiusX, RadiusY);
+    CenterClip.xy += float2(
+        2.0 * DeltaPixels.x / ViewSize.x,
+        -2.0 * DeltaPixels.y / ViewSize.y) * CenterClip.w;
+    Output.Position = CenterClip;
+    Output.DeltaPixels = DeltaPixels;
+    Output.Conic = float3(Covariance.z, -Covariance.y, Covariance.x) / SafeDeterminant;
+    Output.Color = RecordColor;
+    Output.TileIndex = 0xffffffffu;
+    Output.DepthRadius = CovarianceDepth.w;
+    Output.CurrentCenterClip = GroupRecordData[RecordBase + 3u];
+    Output.PreviousCenterClip = GroupRecordData[RecordBase + 4u];
+    Output.ComponentSettings = float4(RecordSettings.y, RecordSettings.z, RecordSettings.w, 1.0);
     return Output;
 }
 
@@ -144,5 +175,61 @@ ENCODED_VELOCITY_TYPE VelocityPS(FKasumiVertexOutput Input) : SV_Target0
         }
     }
 
+    return EncodeVelocityToTexture(Calculate3DVelocity(Input.CurrentCenterClip, Input.PreviousCenterClip));
+}
+
+float4 GroupPS(FKasumiVertexOutput Input) : SV_Target0
+{
+    const uint2 PixelCoord = uint2(Input.Position.xy);
+    const float2 Delta = Input.DeltaPixels;
+    const float Power = -0.5 * (
+        Input.Conic.x * Delta.x * Delta.x +
+        2.0 * Input.Conic.y * Delta.x * Delta.y +
+        Input.Conic.z * Delta.y * Delta.y);
+    if (Power > 0.0 || Power < -4.5)
+    {
+        discard;
+    }
+    if (Input.ComponentSettings.y > 0.5)
+    {
+        const float SceneDeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(PixelCoord, 0)).r;
+        if (SceneDeviceZ > Input.Position.z + Input.ComponentSettings.x + Input.DepthRadius)
+        {
+            discard;
+        }
+    }
+    const float Alpha = min(0.99, saturate(Input.Color.a) * exp(Power));
+    return float4(Input.Color.rgb * Alpha, Alpha);
+}
+
+ENCODED_VELOCITY_TYPE GroupVelocityPS(FKasumiVertexOutput Input) : SV_Target0
+{
+    if (Input.ComponentSettings.z < 0.5)
+    {
+        discard;
+    }
+    const uint2 PixelCoord = uint2(Input.Position.xy);
+    const float2 Delta = Input.DeltaPixels;
+    const float Power = -0.5 * (
+        Input.Conic.x * Delta.x * Delta.x +
+        2.0 * Input.Conic.y * Delta.x * Delta.y +
+        Input.Conic.z * Delta.y * Delta.y);
+    if (Power > 0.0 || Power < -4.5)
+    {
+        discard;
+    }
+    const float Alpha = min(0.99, saturate(Input.Color.a) * exp(Power));
+    if (Alpha < 0.05)
+    {
+        discard;
+    }
+    if (Input.ComponentSettings.y > 0.5)
+    {
+        const float SceneDeviceZ = VelocitySceneDepthTexture.Load(int3(PixelCoord, 0)).r;
+        if (SceneDeviceZ > Input.Position.z + Input.ComponentSettings.x + Input.DepthRadius)
+        {
+            discard;
+        }
+    }
     return EncodeVelocityToTexture(Calculate3DVelocity(Input.CurrentCenterClip, Input.PreviousCenterClip));
 }

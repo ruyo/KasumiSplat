@@ -37,7 +37,7 @@ Effects derive every frame from immutable source data, Stable ID, Seed, and norm
 
 ## Known limits
 
-- Bucket mode uses 4096 quantized depth ranges. GlobalRadix provides exact per-component ordering. Tiled uses a budgeted variable-length tile/depth pair set. When its configured bounds permit an overflow, it prepares a GlobalRadix ordering and switches to it in the same frame if the GPU detects one.
+- Bucket mode uses 4096 quantized depth ranges. GlobalRadix provides exact per-component ordering. `Sort Scope = Scene Group` additionally combines two or more components with the same `Global Sort Group` into one exact Global Radix ordering; a group containing one component uses the normal per-Actor path. Tiled uses a budgeted variable-length tile/depth pair set. When its configured bounds permit an overflow, it prepares a GlobalRadix ordering and switches to it in the same frame if the GPU detects one.
 - `Full Quality Reference` loads every point and disables LOD and small-point rejection for fixed-camera comparisons.
 - `Antialiasing Mode` provides Disabled, Legacy Filter, and Area Compensated variants. The `BeforeDOF` pass uses the same jittered projection as Scene Depth and the later temporal upscaler. Resident LOD changes fade by Stable ID so points present in both snapshots are composited once.
 - Screen-space Gaussian filtering defaults to `0.3 px²` and compensates opacity for the filtered footprint. HDR composition applies UE pre-exposure, and imported axis conversion is also applied to SH view directions. Reimport older assets to store the SH direction basis.

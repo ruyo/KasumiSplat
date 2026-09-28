@@ -150,6 +150,14 @@ enum class EKasumiSplatSortMode : uint8
     Tiled
 };
 
+/** Defines whether transparency ordering is isolated to one component or shared by a named scene group. */
+UENUM(BlueprintType)
+enum class EKasumiSplatSortScope : uint8
+{
+    PerActor UMETA(DisplayName="Per Actor"),
+    SceneGroup UMETA(DisplayName="Scene Group")
+};
+
 /** Selects whether a potentially overflowing Tiled sort prepares its Global Radix fallback immediately. */
 UENUM(BlueprintType)
 enum class EKasumiSplatTiledFallbackMode : uint8

@@ -8,6 +8,7 @@
 
 StructuredBuffer<float4> PointData;
 StructuredBuffer<uint> SHData;
+StructuredBuffer<float4> GroupRecordData;
 Buffer<uint> VisibilityBuckets;
 Buffer<uint> ExactValues;
 Buffer<uint> BucketCounts;
@@ -26,6 +27,7 @@ RWBuffer<uint> RWExactKeys;
 RWBuffer<uint> RWExactValues;
 RWBuffer<uint> RWTileKeys;
 RWBuffer<uint> RWTileValues;
+RWStructuredBuffer<float4> RWGroupRecordData;
 
 float4x4 LocalToWorld;
 float4x4 WorldToClip;
@@ -67,6 +69,9 @@ uint4 TileConfig;
 uint HigherOrderSHCoefficientsPerPoint;
 uint SHWordsPerPoint;
 uint ResetVelocityHistory;
+uint WriteGroupRecords;
+uint GroupOutputBase;
+uint VelocityEnabled;
 float3 ViewLocalPosition;
 float4 LayerTypeWeight[4];
 float4 LayerMaskCenterFeather[4];

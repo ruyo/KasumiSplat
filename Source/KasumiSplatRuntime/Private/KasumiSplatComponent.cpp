@@ -630,6 +630,10 @@ void UKasumiSplatComponent::Publish()
     Packet.Appearance = Appearance;
     Packet.EffectLayers = EffectLayers;
     Packet.SortMode = SortMode;
+    Packet.SortScope = SortScope;
+    Packet.GlobalSortGroup = SortScope == EKasumiSplatSortScope::SceneGroup
+        ? FMath::Max(GlobalSortGroup, 1)
+        : 0;
     Packet.TileSizePixels = TileSizePixels > 0 ? uint32(TileSizePixels) : 0u;
     Packet.MaxTilesPerSplat = uint32(FMath::Max(MaxTilesPerSplat, 0));
     Packet.TiledPairBudgetMB = uint32(FMath::Max(TiledPairBudgetMB, 16));

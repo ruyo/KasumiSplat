@@ -76,6 +76,20 @@ BEGIN_SHADER_PARAMETER_STRUCT(FKasumiSplatVelocityDrawParameters, )
     RENDER_TARGET_BINDING_SLOTS()
 END_SHADER_PARAMETER_STRUCT()
 
+BEGIN_SHADER_PARAMETER_STRUCT(FKasumiSplatGroupDrawParameters, )
+    SHADER_PARAMETER_STRUCT_INCLUDE(FKasumiSplatGroupVS::FParameters, VS)
+    SHADER_PARAMETER_STRUCT_INCLUDE(FKasumiSplatGroupPS::FParameters, PS)
+    RDG_BUFFER_ACCESS(IndirectArgs, ERHIAccess::IndirectArgs)
+    RENDER_TARGET_BINDING_SLOTS()
+END_SHADER_PARAMETER_STRUCT()
+
+BEGIN_SHADER_PARAMETER_STRUCT(FKasumiSplatGroupVelocityDrawParameters, )
+    SHADER_PARAMETER_STRUCT_INCLUDE(FKasumiSplatGroupVS::FParameters, VS)
+    SHADER_PARAMETER_STRUCT_INCLUDE(FKasumiSplatGroupVelocityPS::FParameters, PS)
+    RDG_BUFFER_ACCESS(IndirectArgs, ERHIAccess::IndirectArgs)
+    RENDER_TARGET_BINDING_SLOTS()
+END_SHADER_PARAMETER_STRUCT()
+
 BEGIN_SHADER_PARAMETER_STRUCT(FKasumiSplatSortPassParameters, )
     SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, KeysSRV0)
     SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, KeysSRV1)
@@ -211,6 +225,364 @@ static void AddKasumiVelocityPass(
         });
 }
 
+static void AddKasumiGroupDrawPass(
+    FRDGBuilder& GraphBuilder,
+    FKasumiSplatGroupDrawParameters* Parameters,
+    TShaderMapRef<FKasumiSplatGroupVS> VertexShader,
+    TShaderMapRef<FKasumiSplatGroupPS> PixelShader,
+    const FIntRect& ViewRect)
+{
+    GraphBuilder.AddPass(
+        RDG_EVENT_NAME("KasumiSplat.SceneGroup"),
+        Parameters,
+        ERDGPassFlags::Raster,
+        [Parameters, VertexShader, PixelShader, ViewRect](FRDGAsyncTask, FRHICommandList& RHICmdList)
+        {
+            FGraphicsPipelineStateInitializer GraphicsPSOInit;
+            RHICmdList.ApplyCachedRenderTargets(GraphicsPSOInit);
+            GraphicsPSOInit.BlendState = TStaticBlendState<
+                CW_RGBA,
+                BO_Add, BF_One, BF_InverseSourceAlpha,
+                BO_Add, BF_One, BF_InverseSourceAlpha>::GetRHI();
+            GraphicsPSOInit.RasterizerState = TStaticRasterizerState<FM_Solid, CM_None>::GetRHI();
+            GraphicsPSOInit.DepthStencilState = TStaticDepthStencilState<false, CF_Always>::GetRHI();
+            GraphicsPSOInit.BoundShaderState.VertexDeclarationRHI = GEmptyVertexDeclaration.VertexDeclarationRHI;
+            GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShader.GetVertexShader();
+            GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
+            GraphicsPSOInit.PrimitiveType = PT_TriangleList;
+            SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
+            RHICmdList.SetViewport(ViewRect.Min.X, ViewRect.Min.Y, 0.0f, ViewRect.Max.X, ViewRect.Max.Y, 1.0f);
+            SetShaderParameters(RHICmdList, VertexShader, VertexShader.GetVertexShader(), Parameters->VS);
+            SetShaderParameters(RHICmdList, PixelShader, PixelShader.GetPixelShader(), Parameters->PS);
+            RHICmdList.SetStreamSource(0, nullptr, 0);
+            RHICmdList.DrawPrimitiveIndirect(Parameters->IndirectArgs->GetIndirectRHICallBuffer(), 0);
+        });
+}
+
+static void AddKasumiGroupVelocityPass(
+    FRDGBuilder& GraphBuilder,
+    FKasumiSplatGroupVelocityDrawParameters* Parameters,
+    TShaderMapRef<FKasumiSplatGroupVS> VertexShader,
+    TShaderMapRef<FKasumiSplatGroupVelocityPS> PixelShader,
+    const FIntRect& ViewRect)
+{
+    GraphBuilder.AddPass(
+        RDG_EVENT_NAME("KasumiSplat.SceneGroupVelocity"),
+        Parameters,
+        ERDGPassFlags::Raster,
+        [Parameters, VertexShader, PixelShader, ViewRect](FRDGAsyncTask, FRHICommandList& RHICmdList)
+        {
+            FGraphicsPipelineStateInitializer GraphicsPSOInit;
+            RHICmdList.ApplyCachedRenderTargets(GraphicsPSOInit);
+            GraphicsPSOInit.BlendState = TStaticBlendState<CW_RGBA>::GetRHI();
+            GraphicsPSOInit.RasterizerState = TStaticRasterizerState<FM_Solid, CM_None>::GetRHI();
+            GraphicsPSOInit.DepthStencilState = TStaticDepthStencilState<false, CF_Always>::GetRHI();
+            GraphicsPSOInit.BoundShaderState.VertexDeclarationRHI = GEmptyVertexDeclaration.VertexDeclarationRHI;
+            GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShader.GetVertexShader();
+            GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
+            GraphicsPSOInit.PrimitiveType = PT_TriangleList;
+            SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
+            RHICmdList.SetViewport(ViewRect.Min.X, ViewRect.Min.Y, 0.0f, ViewRect.Max.X, ViewRect.Max.Y, 1.0f);
+            SetShaderParameters(RHICmdList, VertexShader, VertexShader.GetVertexShader(), Parameters->VS);
+            SetShaderParameters(RHICmdList, PixelShader, PixelShader.GetPixelShader(), Parameters->PS);
+            RHICmdList.SetStreamSource(0, nullptr, 0);
+            RHICmdList.DrawPrimitiveIndirect(Parameters->IndirectArgs->GetIndirectRHICallBuffer(), 0);
+        });
+}
+
+static bool RenderKasumiSceneGroup(
+    FRDGBuilder& GraphBuilder,
+    const TArray<TSharedPtr<FKasumiSplatRenderEntry, ESPMode::ThreadSafe>>& GroupEntries,
+    int32 GroupId,
+    const FSceneView& View,
+    const FPostProcessMaterialInputs& Inputs,
+    const FScreenPassRenderTarget& Output,
+    const FRDGSystemTextures& SystemTextures,
+    FRDGTextureRef SceneDepthTexture,
+    FRDGTextureRef VelocityTexture)
+{
+    struct FGroupItem
+    {
+        TSharedPtr<FKasumiSplatRenderEntry, ESPMode::ThreadSafe> Entry;
+        uint32 SourcePointCount = 0;
+        uint32 PointCount = 0;
+        uint32 OutputBase = 0;
+    };
+
+    TArray<FGroupItem, TInlineAllocator<4>> Items;
+    uint64 TotalPointCount64 = 0;
+    const int32 BudgetOverride = CVarKasumiSplatMaxVisibleSplats.GetValueOnRenderThread();
+    const bool bFullQuality = CVarKasumiSplatFullQuality.GetValueOnRenderThread() != 0;
+    bool bAnyVelocity = false;
+    for (const TSharedPtr<FKasumiSplatRenderEntry, ESPMode::ThreadSafe>& Entry : GroupEntries)
+    {
+        const uint32 SourcePointCount = uint32(Entry->Packet.Points->Num());
+        const uint32 VisibleBudget = bFullQuality
+            ? SourcePointCount
+            : BudgetOverride > 0
+                ? uint32(BudgetOverride)
+                : Entry->Packet.MaxVisibleSplats;
+        const uint32 PointCount = FMath::Min(SourcePointCount, FMath::Max(VisibleBudget, 1u));
+        if (PointCount == 0u || TotalPointCount64 + PointCount > uint64(MAX_int32))
+        {
+            return false;
+        }
+        FGroupItem& Item = Items.AddDefaulted_GetRef();
+        Item.Entry = Entry;
+        Item.SourcePointCount = SourcePointCount;
+        Item.PointCount = PointCount;
+        Item.OutputBase = uint32(TotalPointCount64);
+        TotalPointCount64 += PointCount;
+        bAnyVelocity |= Entry->Packet.VelocityMode == EKasumiSplatVelocityMode::ActorAndCamera;
+    }
+    if (Items.Num() <= 1 || TotalPointCount64 == 0u)
+    {
+        return false;
+    }
+
+    const uint32 TotalPointCount = uint32(TotalPointCount64);
+    constexpr uint32 GroupRecordFloat4Count = 6u;
+    FRDGBufferRef ExactKeys0 = GraphBuilder.CreateBuffer(
+        FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), TotalPointCount),
+        TEXT("KasumiSplat.SceneGroupExactKeys0"));
+    FRDGBufferRef ExactKeys1 = GraphBuilder.CreateBuffer(
+        FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), TotalPointCount),
+        TEXT("KasumiSplat.SceneGroupExactKeys1"));
+    FRDGBufferRef ExactValues0 = GraphBuilder.CreateBuffer(
+        FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), TotalPointCount),
+        TEXT("KasumiSplat.SceneGroupExactValues0"));
+    FRDGBufferRef ExactValues1 = GraphBuilder.CreateBuffer(
+        FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), TotalPointCount),
+        TEXT("KasumiSplat.SceneGroupExactValues1"));
+    FRDGBufferRef GroupRecordData = GraphBuilder.CreateBuffer(
+        FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector4f), TotalPointCount * GroupRecordFloat4Count),
+        TEXT("KasumiSplat.SceneGroupRecords"));
+    FRDGBufferRef DrawIndirectArgs = GraphBuilder.CreateBuffer(
+        FRDGBufferDesc::CreateIndirectDesc(4),
+        TEXT("KasumiSplat.SceneGroupDrawIndirectArgs"));
+
+    FRDGBufferRef DummyUint = GraphBuilder.CreateBuffer(
+        FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), 1),
+        TEXT("KasumiSplat.SceneGroupDummyUint"));
+    FRDGBufferRef DummyIndirectArgs = GraphBuilder.CreateBuffer(
+        FRDGBufferDesc::CreateIndirectDesc(4),
+        TEXT("KasumiSplat.SceneGroupDummyIndirectArgs"));
+    AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ExactKeys0, PF_R32_UINT), 0xffffffffu);
+    AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ExactKeys1, PF_R32_UINT), 0xffffffffu);
+    AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ExactValues0, PF_R32_UINT), 0xffffffffu);
+    AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ExactValues1, PF_R32_UINT), 0xffffffffu);
+    AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(DrawIndirectArgs, PF_R32_UINT), 0u);
+    AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(DummyUint, PF_R32_UINT), 0u);
+    AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(DummyIndirectArgs, PF_R32_UINT), 0u);
+
+    const FVector2f ViewSize(Output.ViewRect.Width(), Output.ViewRect.Height());
+    const FMatrix44f WorldToClip(View.ViewMatrices.GetWorldToClip());
+    TShaderMapRef<FKasumiSplatCullCS> CullShader(GetGlobalShaderMap(View.GetFeatureLevel()));
+    const int32 AntialiasingOverride = CVarKasumiSplatAntialiasingMode.GetValueOnRenderThread();
+    const float RadiusOverride = CVarKasumiSplatMaxProjectedRadius.GetValueOnRenderThread();
+
+    for (const FGroupItem& Item : Items)
+    {
+        FKasumiSplatRenderEntry& Entry = *Item.Entry;
+        const FKasumiSplatGPUData GPUData = GetOrCreateSplatGPUData(GraphBuilder, Entry);
+        const FMatrix44f LocalToWorld(Entry.Packet.LocalToWorld.ToMatrixWithScale());
+        const bool bResetVelocity = View.bCameraCut ||
+            Entry.Packet.bResetVelocityHistory ||
+            !Entry.bVelocityHistoryValid;
+        const float MaxProjectedRadiusPixels = RadiusOverride >= 1.0f
+            ? RadiusOverride
+            : Entry.Packet.MaxProjectedRadiusPixels;
+        const FVector4f StyleValues(
+            FMath::Clamp(Entry.Packet.Style.Scale, 0.0f, 10.0f),
+            FMath::Clamp(Entry.Packet.Style.Opacity, 0.0f, 1.0f),
+            FMath::Clamp(Entry.Packet.Style.Progress, 0.0f, 1.0f),
+            FMath::Clamp(Entry.Packet.Style.Displacement, 0.0f, 1000.0f));
+        const FVector4f AppearanceValues(
+            Entry.Packet.Appearance.ExposureEV,
+            Entry.Packet.Appearance.Saturation,
+            Entry.Packet.Appearance.Contrast,
+            Entry.Packet.Appearance.SHStrength);
+        const FVector4f EffectTint(
+            Entry.Packet.Style.EffectTint.R,
+            Entry.Packet.Style.EffectTint.G,
+            Entry.Packet.Style.EffectTint.B,
+            Entry.Packet.Style.EffectTint.A);
+        const FVector4f EffectValues(
+            FMath::Clamp(Entry.Packet.Style.TargetScale, 0.0f, 10.0f),
+            FMath::Clamp(Entry.Packet.Style.TargetOpacity, 0.0f, 1.0f),
+            Entry.Packet.Style.RotationDegrees,
+            FMath::Clamp(Entry.Packet.Style.NoiseAmount, 0.0f, 1.0f));
+        const FVector4f MaskCenterRadius(
+            FVector3f(Entry.Packet.Style.MaskCenter),
+            FMath::Max(0.0f, Entry.Packet.Style.MaskRadius));
+        const FVector2f MaskValues(FMath::Max(0.0f, Entry.Packet.Style.MaskFeather), 0.0f);
+
+        FVector4f LayerTypeWeight[KasumiMaxEffectLayers] = {FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero()};
+        FVector4f LayerMaskCenterFeather[KasumiMaxEffectLayers] = {FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero()};
+        FVector4f LayerMaskExtentEnabled[KasumiMaxEffectLayers] = {FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero()};
+        FVector4f LayerTint[KasumiMaxEffectLayers] = {FVector4f(1), FVector4f(1), FVector4f(1), FVector4f(1)};
+        FVector4f LayerVectorSeed[KasumiMaxEffectLayers] = {FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero()};
+        const uint32 LayerCount = FMath::Min<uint32>(Entry.Packet.EffectLayers.Num(), KasumiMaxEffectLayers);
+        for (uint32 LayerIndex = 0; LayerIndex < LayerCount; ++LayerIndex)
+        {
+            const FKasumiSplatEffectLayer& Layer = Entry.Packet.EffectLayers[LayerIndex];
+            LayerTypeWeight[LayerIndex] = FVector4f(
+                float(Layer.Type), FMath::Clamp(Layer.Weight, 0.0f, 1.0f), float(Layer.MaskShape), Layer.Scalar);
+            LayerMaskCenterFeather[LayerIndex] = FVector4f(FVector3f(Layer.MaskCenter), FMath::Max(0.0f, Layer.Feather));
+            LayerMaskExtentEnabled[LayerIndex] = FVector4f(FVector3f(Layer.MaskExtent.GetAbs()), Layer.bEnabled ? 1.0f : 0.0f);
+            LayerTint[LayerIndex] = FVector4f(Layer.Tint.R, Layer.Tint.G, Layer.Tint.B, Layer.Tint.A);
+            LayerVectorSeed[LayerIndex] = FVector4f(FVector3f(Layer.Vector), float(Layer.Seed));
+        }
+        uint32 ExternalMaskMode = uint32(Entry.Packet.ExternalMaskMode);
+        if ((ExternalMaskMode == uint32(EKasumiSplatExternalMask::Texture2D) && !Entry.Packet.EffectMaskTexture) ||
+            (ExternalMaskMode == uint32(EKasumiSplatExternalMask::VolumeTexture) && !Entry.Packet.EffectMaskVolume))
+        {
+            ExternalMaskMode = 0u;
+        }
+        const FVector4f ExternalMaskCenterMode(FVector3f(Entry.Packet.ExternalMaskCenter), float(ExternalMaskMode));
+        const FVector4f ExternalMaskExtentValues(
+            FVector3f(Entry.Packet.ExternalMaskExtent),
+            Entry.Packet.bInvertExternalMask ? -Entry.Packet.ExternalMaskStrength : Entry.Packet.ExternalMaskStrength);
+        FRDGTextureRef MaskTexture2D = Entry.Packet.EffectMaskTexture
+            ? GraphBuilder.RegisterExternalTexture(CreateRenderTarget(Entry.Packet.EffectMaskTexture, TEXT("KasumiSplat.GroupExternalMask2D")))
+            : SystemTextures.White;
+        FRDGTextureRef MaskTexture3D = Entry.Packet.EffectMaskVolume
+            ? GraphBuilder.RegisterExternalTexture(CreateRenderTarget(Entry.Packet.EffectMaskVolume, TEXT("KasumiSplat.GroupExternalMask3D")))
+            : SystemTextures.VolumetricBlack;
+
+        FKasumiSplatCullCS::FParameters* Parameters = GraphBuilder.AllocParameters<FKasumiSplatCullCS::FParameters>();
+        Parameters->PointData = GraphBuilder.CreateSRV(GPUData.PointBuffer);
+        Parameters->SHData = GraphBuilder.CreateSRV(GPUData.SHBuffer);
+        Parameters->View = View.ViewUniformBuffer;
+        Parameters->LocalToWorld = LocalToWorld;
+        Parameters->WorldToClip = WorldToClip;
+        Parameters->PreviousLocalToWorld = FMatrix44f(
+            (bResetVelocity ? Entry.Packet.LocalToWorld : Entry.PreviousLocalToWorld).ToMatrixWithScale());
+        Parameters->LocalToSHDirection = Entry.Packet.LocalToSHDirection;
+        Parameters->ViewSize = ViewSize;
+        Parameters->Tint = FVector4f(
+            Entry.Packet.Style.Tint.R,
+            Entry.Packet.Style.Tint.G,
+            Entry.Packet.Style.Tint.B,
+            Entry.Packet.Style.Tint.A);
+        Parameters->StyleValues = StyleValues;
+        Parameters->AppearanceValues = AppearanceValues;
+        Parameters->OpacityDensity = Entry.Packet.Appearance.OpacityDensity;
+        Parameters->EffectTint = EffectTint;
+        Parameters->EffectValues = EffectValues;
+        Parameters->MaskCenterRadius = MaskCenterRadius;
+        Parameters->MaskValues = MaskValues;
+        Parameters->ProjectedRadiusRange = FVector2f(
+            bFullQuality ? 0.0f : Entry.Packet.MinProjectedRadiusPixels,
+            MaxProjectedRadiusPixels);
+        Parameters->AntialiasingFilterVariance = Entry.Packet.AntialiasingFilterVariance;
+        Parameters->AntialiasingMode = AntialiasingOverride >= 0
+            ? uint32(FMath::Clamp(AntialiasingOverride, 0, 2))
+            : uint32(Entry.Packet.AntialiasingMode);
+        Parameters->TemporalTransitionAlpha = Entry.Packet.TemporalTransitionAlpha;
+        Parameters->ShapeLimits = FVector2f(Entry.Packet.MaxAnisotropy, Entry.Packet.MaxSplatSigmaCentimeters);
+        Parameters->SceneTextures = Inputs.SceneTextures;
+        Parameters->ViewRectMin = FVector2f(Output.ViewRect.Min.X, Output.ViewRect.Min.Y);
+        Parameters->SceneDepthBias = Entry.Packet.SceneDepthBias;
+        Parameters->DepthPreCullMaxRadiusPixels = bFullQuality ? 0.0f : Entry.Packet.DepthPreCullMaxRadiusPixels;
+        Parameters->UseSceneDepth = Entry.Packet.bUseSceneDepth ? 1u : 0u;
+        Parameters->LayerCount = LayerCount;
+        FMemory::Memcpy(Parameters->LayerTypeWeight.GetData(), LayerTypeWeight, sizeof(LayerTypeWeight));
+        FMemory::Memcpy(Parameters->LayerMaskCenterFeather.GetData(), LayerMaskCenterFeather, sizeof(LayerMaskCenterFeather));
+        FMemory::Memcpy(Parameters->LayerMaskExtentEnabled.GetData(), LayerMaskExtentEnabled, sizeof(LayerMaskExtentEnabled));
+        FMemory::Memcpy(Parameters->LayerTint.GetData(), LayerTint, sizeof(LayerTint));
+        FMemory::Memcpy(Parameters->LayerVectorSeed.GetData(), LayerVectorSeed, sizeof(LayerVectorSeed));
+        Parameters->ExternalMaskTexture2D = MaskTexture2D;
+        Parameters->ExternalMaskTexture3D = MaskTexture3D;
+        Parameters->ExternalMaskSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+        Parameters->ExternalMaskCenterMode = ExternalMaskCenterMode;
+        Parameters->ExternalMaskExtentValues = ExternalMaskExtentValues;
+        Parameters->ViewLocalPosition = FVector3f(
+            Entry.Packet.LocalToWorld.InverseTransformPosition(View.ViewMatrices.GetViewOrigin()));
+        Parameters->HigherOrderSHCoefficientsPerPoint = Entry.Packet.HigherOrderSHCoefficientsPerPoint;
+        Parameters->SHWordsPerPoint = FMath::DivideAndRoundUp(Entry.Packet.HigherOrderSHCoefficientsPerPoint, 2u);
+        Parameters->ResetVelocityHistory = bResetVelocity ? 1u : 0u;
+        Parameters->WriteGroupRecords = 1u;
+        Parameters->GroupOutputBase = Item.OutputBase;
+        Parameters->VelocityEnabled =
+            Entry.Packet.VelocityMode == EKasumiSplatVelocityMode::ActorAndCamera && VelocityTexture ? 1u : 0u;
+        Parameters->Seed = uint32(Entry.Packet.Style.Seed);
+        Parameters->PointCount = Item.PointCount;
+        Parameters->SourcePointCount = Item.SourcePointCount;
+        Parameters->UseLogDepthSort = View.IsPerspectiveProjection() ? 1u : 0u;
+        Parameters->SortPath = 1u;
+        Parameters->EnableTiledFallback = 0u;
+        Parameters->MaxTilesPerSplat = 1u;
+        Parameters->TilePairCapacity = 1u;
+        Parameters->TileDepthBits = 16u;
+        Parameters->TileConfig = FUintVector4(32u, 1u, 1u, 16u);
+        Parameters->RWVisibilityBuckets = GraphBuilder.CreateUAV(DummyUint, PF_R32_UINT);
+        Parameters->RWBucketCounts = GraphBuilder.CreateUAV(DummyUint, PF_R32_UINT);
+        Parameters->RWExactKeys = GraphBuilder.CreateUAV(ExactKeys0, PF_R32_UINT);
+        Parameters->RWExactValues = GraphBuilder.CreateUAV(ExactValues0, PF_R32_UINT);
+        Parameters->RWDrawIndirectArgs = GraphBuilder.CreateUAV(DrawIndirectArgs, PF_R32_UINT);
+        Parameters->RWTileDrawIndirectArgs = GraphBuilder.CreateUAV(DummyIndirectArgs, PF_R32_UINT);
+        Parameters->RWTileOverflow = GraphBuilder.CreateUAV(DummyUint, PF_R32_UINT);
+        Parameters->RWTileKeys = GraphBuilder.CreateUAV(DummyUint, PF_R32_UINT);
+        Parameters->RWTileValues = GraphBuilder.CreateUAV(DummyUint, PF_R32_UINT);
+        Parameters->RWGroupRecordData = GraphBuilder.CreateUAV(GroupRecordData);
+        FComputeShaderUtils::AddPass(
+            GraphBuilder,
+            RDG_EVENT_NAME("KasumiSplat.SceneGroupCull(%d:%u)", GroupId, Item.PointCount),
+            CullShader,
+            Parameters,
+            FComputeShaderUtils::GetGroupCount(Item.PointCount, KasumiCullGroupSize));
+    }
+
+    AddKasumiRadixSortPass(
+        GraphBuilder,
+        ExactKeys0,
+        ExactKeys1,
+        ExactValues0,
+        ExactValues1,
+        TotalPointCount,
+        View.GetFeatureLevel(),
+        TEXT("SceneGroupGlobal"));
+
+    TShaderMapRef<FKasumiSplatGroupVS> GroupVertexShader(GetGlobalShaderMap(View.GetFeatureLevel()));
+    TShaderMapRef<FKasumiSplatGroupPS> GroupPixelShader(GetGlobalShaderMap(View.GetFeatureLevel()));
+    FKasumiSplatGroupDrawParameters* DrawParameters = GraphBuilder.AllocParameters<FKasumiSplatGroupDrawParameters>();
+    DrawParameters->VS.GroupRecordData = GraphBuilder.CreateSRV(GroupRecordData);
+    DrawParameters->VS.VisibleIndices = GraphBuilder.CreateSRV(ExactValues0, PF_R32_UINT);
+    DrawParameters->VS.ViewSize = ViewSize;
+    DrawParameters->PS.SceneTextures = Inputs.SceneTextures;
+    DrawParameters->IndirectArgs = DrawIndirectArgs;
+    DrawParameters->RenderTargets[0] = FRenderTargetBinding(Output.Texture, ERenderTargetLoadAction::ELoad);
+    AddKasumiGroupDrawPass(GraphBuilder, DrawParameters, GroupVertexShader, GroupPixelShader, Output.ViewRect);
+
+    if (bAnyVelocity && VelocityTexture)
+    {
+        TShaderMapRef<FKasumiSplatGroupVelocityPS> GroupVelocityShader(GetGlobalShaderMap(View.GetFeatureLevel()));
+        FKasumiSplatGroupVelocityDrawParameters* VelocityParameters =
+            GraphBuilder.AllocParameters<FKasumiSplatGroupVelocityDrawParameters>();
+        VelocityParameters->VS = DrawParameters->VS;
+        VelocityParameters->PS.View = View.ViewUniformBuffer;
+        VelocityParameters->PS.VelocitySceneDepthTexture = SceneDepthTexture;
+        VelocityParameters->IndirectArgs = DrawIndirectArgs;
+        VelocityParameters->RenderTargets[0] = FRenderTargetBinding(VelocityTexture, ERenderTargetLoadAction::ELoad);
+        AddKasumiGroupVelocityPass(
+            GraphBuilder,
+            VelocityParameters,
+            GroupVertexShader,
+            GroupVelocityShader,
+            Output.ViewRect);
+    }
+
+    UE_LOG(
+        LogKasumiSplatRenderer,
+        Verbose,
+        TEXT("Scene group %d globally sorted %u submitted splats across %d components."),
+        GroupId,
+        TotalPointCount,
+        Items.Num());
+    return true;
+}
+
 class FKasumiSplatViewExtension : public FSceneViewExtensionBase
 {
 public:
@@ -316,8 +688,54 @@ public:
             ? Inputs.SceneTextures.SceneTextures->GetParameters()->SceneDepthTexture
             : SystemTextures.Black;
 
+        TMap<int32, TArray<TSharedPtr<FKasumiSplatRenderEntry, ESPMode::ThreadSafe>>> SceneGroups;
         for (const TSharedPtr<FKasumiSplatRenderEntry, ESPMode::ThreadSafe>& Entry : VisibleEntries)
         {
+            if (Entry->Packet.SortScope == EKasumiSplatSortScope::SceneGroup &&
+                Entry->Packet.GlobalSortGroup > 0)
+            {
+                SceneGroups.FindOrAdd(Entry->Packet.GlobalSortGroup).Add(Entry);
+            }
+        }
+        TSet<int32> RenderedSceneGroups;
+        TSet<int32> FailedSceneGroups;
+
+        for (const TSharedPtr<FKasumiSplatRenderEntry, ESPMode::ThreadSafe>& Entry : VisibleEntries)
+        {
+            if (Entry->Packet.SortScope == EKasumiSplatSortScope::SceneGroup &&
+                Entry->Packet.GlobalSortGroup > 0)
+            {
+                const int32 GroupId = Entry->Packet.GlobalSortGroup;
+                const TArray<TSharedPtr<FKasumiSplatRenderEntry, ESPMode::ThreadSafe>>* GroupEntries =
+                    SceneGroups.Find(GroupId);
+                if (GroupEntries && GroupEntries->Num() > 1)
+                {
+                    if (!RenderedSceneGroups.Contains(GroupId) && !FailedSceneGroups.Contains(GroupId))
+                    {
+                        if (RenderKasumiSceneGroup(
+                            GraphBuilder,
+                            *GroupEntries,
+                            GroupId,
+                            View,
+                            Inputs,
+                            Output,
+                            SystemTextures,
+                            SceneDepthTexture,
+                            VelocityTexture))
+                        {
+                            RenderedSceneGroups.Add(GroupId);
+                        }
+                        else
+                        {
+                            FailedSceneGroups.Add(GroupId);
+                        }
+                    }
+                    if (RenderedSceneGroups.Contains(GroupId))
+                    {
+                        continue;
+                    }
+                }
+            }
             const FKasumiSplatGPUData GPUData = GetOrCreateSplatGPUData(GraphBuilder, *Entry);
             FRDGBufferRef PointBuffer = GPUData.PointBuffer;
             FRDGBufferRef SHBuffer = GPUData.SHBuffer;
@@ -533,6 +951,9 @@ public:
             FRDGBufferRef TileValues1 = GraphBuilder.CreateBuffer(
                 FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), TileEntryCount),
                 TEXT("KasumiSplat.TileValues1"));
+            FRDGBufferRef GroupRecordData = GraphBuilder.CreateBuffer(
+                FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector4f), 1),
+                TEXT("KasumiSplat.UnusedGroupRecord"));
 
             if (bBucketPath)
             {
@@ -553,6 +974,9 @@ public:
             }
 
             const FMatrix44f LocalToWorld(Entry->Packet.LocalToWorld.ToMatrixWithScale());
+            const bool bResetVelocity = View.bCameraCut ||
+                Entry->Packet.bResetVelocityHistory ||
+                !Entry->bVelocityHistoryValid;
             const FVector4f StyleValues(
                 FMath::Clamp(Entry->Packet.Style.Scale, 0.0f, 10.0f),
                 FMath::Clamp(Entry->Packet.Style.Opacity, 0.0f, 1.0f),
@@ -614,8 +1038,13 @@ public:
 
             FKasumiSplatCullCS::FParameters* CullParameters = GraphBuilder.AllocParameters<FKasumiSplatCullCS::FParameters>();
             CullParameters->PointData = GraphBuilder.CreateSRV(PointBuffer);
+            CullParameters->SHData = GraphBuilder.CreateSRV(SHBuffer);
+            CullParameters->View = View.ViewUniformBuffer;
             CullParameters->LocalToWorld = LocalToWorld;
             CullParameters->WorldToClip = WorldToClip;
+            CullParameters->PreviousLocalToWorld = FMatrix44f(
+                (bResetVelocity ? Entry->Packet.LocalToWorld : Entry->PreviousLocalToWorld).ToMatrixWithScale());
+            CullParameters->LocalToSHDirection = Entry->Packet.LocalToSHDirection;
             CullParameters->ViewSize = ViewSize;
             CullParameters->Tint = FVector4f(
                 Entry->Packet.Style.Tint.R,
@@ -667,6 +1096,16 @@ public:
             CullParameters->ExternalMaskSampler = MaskSampler;
             CullParameters->ExternalMaskCenterMode = ExternalMaskCenterMode;
             CullParameters->ExternalMaskExtentValues = ExternalMaskExtentValues;
+            CullParameters->ViewLocalPosition = FVector3f(
+                Entry->Packet.LocalToWorld.InverseTransformPosition(View.ViewMatrices.GetViewOrigin()));
+            CullParameters->HigherOrderSHCoefficientsPerPoint = Entry->Packet.HigherOrderSHCoefficientsPerPoint;
+            CullParameters->SHWordsPerPoint = FMath::DivideAndRoundUp(
+                Entry->Packet.HigherOrderSHCoefficientsPerPoint,
+                2u);
+            CullParameters->ResetVelocityHistory = bResetVelocity ? 1u : 0u;
+            CullParameters->WriteGroupRecords = 0u;
+            CullParameters->GroupOutputBase = 0u;
+            CullParameters->VelocityEnabled = 0u;
             CullParameters->RWVisibilityBuckets = GraphBuilder.CreateUAV(VisibilityBuckets, PF_R32_UINT);
             CullParameters->RWBucketCounts = GraphBuilder.CreateUAV(BucketCounts, PF_R32_UINT);
             CullParameters->RWExactKeys = GraphBuilder.CreateUAV(ExactKeys0, PF_R32_UINT);
@@ -676,6 +1115,7 @@ public:
             CullParameters->RWTileOverflow = GraphBuilder.CreateUAV(TileOverflow, PF_R32_UINT);
             CullParameters->RWTileKeys = GraphBuilder.CreateUAV(TileKeys0, PF_R32_UINT);
             CullParameters->RWTileValues = GraphBuilder.CreateUAV(TileValues0, PF_R32_UINT);
+            CullParameters->RWGroupRecordData = GraphBuilder.CreateUAV(GroupRecordData);
             FComputeShaderUtils::AddPass(
                 GraphBuilder,
                 RDG_EVENT_NAME("KasumiSplat.Cull(%u)", PointCount),
@@ -794,9 +1234,6 @@ public:
             Parameters->VS.TileKeys = GraphBuilder.CreateSRV(TileKeys0, PF_R32_UINT);
             Parameters->VS.LocalToWorld = LocalToWorld;
             Parameters->VS.WorldToClip = WorldToClip;
-            const bool bResetVelocity = View.bCameraCut ||
-                Entry->Packet.bResetVelocityHistory ||
-                !Entry->bVelocityHistoryValid;
             Parameters->VS.PreviousLocalToWorld = FMatrix44f(
                 (bResetVelocity ? Entry->Packet.LocalToWorld : Entry->PreviousLocalToWorld).ToMatrixWithScale());
             Parameters->VS.ResetVelocityHistory = bResetVelocity ? 1u : 0u;
