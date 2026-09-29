@@ -144,10 +144,16 @@ public:
         FKasumiSplatBuildProgress ProgressCallback = {});
     bool LoadPoints(TArray<FKasumiSplatPoint>& OutPoints) const;
     bool LoadHigherOrderSH(TArray<float>& OutHigherOrderSH) const;
+    /** Loads SH as the GPU-ready per-point stream of two FP16 coefficients per uint32 word. */
+    bool LoadHigherOrderSHPacked(TArray<uint32>& OutPackedHigherOrderSH) const;
     bool LoadPointChunks(
         const TArray<int32>& ChunkIndices,
         TArray<FKasumiSplatPoint>& OutPoints,
         TArray<float>* OutHigherOrderSH = nullptr) const;
+    bool LoadPointChunksPacked(
+        const TArray<int32>& ChunkIndices,
+        TArray<FKasumiSplatPoint>& OutPoints,
+        TArray<uint32>* OutPackedHigherOrderSH = nullptr) const;
 
     using FChunkLoadCallback = TFunction<void(
         bool bSuccess,
@@ -155,8 +161,17 @@ public:
         TArray<float>&& HigherOrderSH,
         int32 HigherOrderSHCoefficientsPerPoint)>;
 
-    /** Loads only the requested packed ranges. The callback is always dispatched on the game thread. */
+    /** Compatibility path that expands SH to floats. The callback is always dispatched on the game thread. */
     void LoadPointChunksAsync(const TArray<int32>& ChunkIndices, FChunkLoadCallback&& Callback) const;
+
+    using FPackedChunkLoadCallback = TFunction<void(
+        bool bSuccess,
+        TArray<FKasumiSplatPoint>&& Points,
+        TArray<uint32>&& PackedHigherOrderSH,
+        int32 HigherOrderSHCoefficientsPerPoint)>;
+
+    /** Loads only the requested ranges and keeps SH in the GPU-ready FP16-pair layout. */
+    void LoadPointChunksPackedAsync(const TArray<int32>& ChunkIndices, FPackedChunkLoadCallback&& Callback) const;
 
 private:
     mutable FCriticalSection BulkDataCriticalSection;

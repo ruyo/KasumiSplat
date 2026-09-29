@@ -127,9 +127,13 @@ int32 UKasumiSplatComponent::GetLoadedPointCount() const
 
 int32 UKasumiSplatComponent::GetLoadedHigherOrderSHValueCount() const
 {
-    return StreamingState->TargetSnapshot.HigherOrderSH.IsValid()
-        ? StreamingState->TargetSnapshot.HigherOrderSH->Num()
-        : StreamingState->SourceHigherOrderSH.Num();
+    const int32 CoefficientsPerPoint = StreamingState->TargetSnapshot.HigherOrderSH.IsValid()
+        ? StreamingState->TargetSnapshot.HigherOrderSHCoefficientsPerPoint
+        : StreamingState->SourceHigherOrderSHCoefficientsPerPoint;
+    const int32 PointCount = StreamingState->TargetSnapshot.Points.IsValid()
+        ? StreamingState->TargetSnapshot.Points->Num()
+        : StreamingState->SourcePoints.Num();
+    return PointCount * CoefficientsPerPoint;
 }
 
 int32 UKasumiSplatComponent::GetResidentRevision() const
@@ -260,11 +264,11 @@ int64 UKasumiSplatComponent::GetApproximateResidentBytes() const
     const int64 RenderPointCount = StreamingState->RenderSnapshot.Points.IsValid()
         ? StreamingState->RenderSnapshot.Points->Num()
         : 0;
-    const int64 RenderSHValueCount = StreamingState->RenderSnapshot.HigherOrderSH.IsValid()
+    const int64 RenderSHWordCount = StreamingState->RenderSnapshot.HigherOrderSH.IsValid()
         ? StreamingState->RenderSnapshot.HigherOrderSH->Num()
         : 0;
     const int64 GpuBytes = RenderPointCount * 4 * sizeof(FVector4f) +
-        FMath::DivideAndRoundUp<int64>(RenderSHValueCount, 2) * sizeof(uint32);
+        RenderSHWordCount * sizeof(uint32);
     return CpuBytes + GpuBytes;
 }
 
@@ -373,9 +377,9 @@ void UKasumiSplatComponent::ReloadPoints()
     }
     if (Asset && Asset->GetPointCount() > 0 && Asset->LoadPoints(StreamingState->SourcePoints))
     {
-        Asset->LoadHigherOrderSH(StreamingState->SourceHigherOrderSH);
+        Asset->LoadHigherOrderSHPacked(StreamingState->SourceHigherOrderSH);
         StreamingState->SourceHigherOrderSHCoefficientsPerPoint = Asset->GetHigherOrderSHCoefficientsPerPoint();
-        ReduceKasumiSplatSHDegree(
+        ReduceKasumiSplatPackedSHDegree(
             SHDegree,
             StreamingState->SourcePoints.Num(),
             StreamingState->SourceHigherOrderSHCoefficientsPerPoint,
@@ -403,9 +407,10 @@ void UKasumiSplatComponent::RebuildSharedSourcePoints()
     NewTarget.Points = MakeShared<TArray<FKasumiSplatPoint>, ESPMode::ThreadSafe>(MoveTemp(StreamingState->SourcePoints));
     NewTarget.HigherOrderSHCoefficientsPerPoint = StreamingState->SourceHigherOrderSHCoefficientsPerPoint;
     if (NewTarget.HigherOrderSHCoefficientsPerPoint > 0 &&
-        StreamingState->SourceHigherOrderSH.Num() == SourcePointCount * NewTarget.HigherOrderSHCoefficientsPerPoint)
+        StreamingState->SourceHigherOrderSH.Num() == SourcePointCount *
+            FMath::DivideAndRoundUp(NewTarget.HigherOrderSHCoefficientsPerPoint, 2))
     {
-        NewTarget.HigherOrderSH = MakeShared<TArray<float>, ESPMode::ThreadSafe>(MoveTemp(StreamingState->SourceHigherOrderSH));
+        NewTarget.HigherOrderSH = MakeShared<TArray<uint32>, ESPMode::ThreadSafe>(MoveTemp(StreamingState->SourceHigherOrderSH));
     }
     else
     {
@@ -499,11 +504,11 @@ void UKasumiSplatComponent::UpdateStreamingWorkingSet(bool bForce)
     const uint32 RequestSerial = ++StreamingState->RequestSerial;
     const int32 LODStride = Selection.LODStride;
     TWeakObjectPtr<UKasumiSplatComponent> WeakThis(this);
-    Asset->LoadPointChunksAsync(Selection.ChunkIndices,
+    Asset->LoadPointChunksPackedAsync(Selection.ChunkIndices,
         [WeakThis, RequestSerial, LODStride](
             bool bSuccess,
             TArray<FKasumiSplatPoint>&& LoadedPoints,
-            TArray<float>&& LoadedSH,
+            TArray<uint32>&& LoadedSH,
             int32 SHCoefficientsPerPoint) mutable
     {
         UKasumiSplatComponent* Component = WeakThis.Get();
@@ -520,12 +525,12 @@ void UKasumiSplatComponent::UpdateStreamingWorkingSet(bool bForce)
                 LoadedPoints = MoveTemp(LoadedPoints), LoadedSH = MoveTemp(LoadedSH)]() mutable
         {
             int32 ResidentSHCoefficientsPerPoint = SHCoefficientsPerPoint;
-            ReduceKasumiSplatSHDegree(
+            ReduceKasumiSplatPackedSHDegree(
                 RequestedSHDegree,
                 LoadedPoints.Num(),
                 ResidentSHCoefficientsPerPoint,
                 LoadedSH);
-            ApplyKasumiSplatLOD(LODStride, ResidentSHCoefficientsPerPoint, LoadedPoints, LoadedSH);
+            ApplyKasumiSplatPackedLOD(LODStride, ResidentSHCoefficientsPerPoint, LoadedPoints, LoadedSH);
             AsyncTask(ENamedThreads::GameThread,
                 [WeakThis, RequestSerial, ResidentSHCoefficientsPerPoint,
                     LoadedPoints = MoveTemp(LoadedPoints), LoadedSH = MoveTemp(LoadedSH)]() mutable
@@ -646,6 +651,7 @@ void UKasumiSplatComponent::Publish()
     Packet.MaxVisibleSplats = bFullQuality && Packet.Points.IsValid()
         ? uint32(Packet.Points->Num())
         : uint32(FMath::Max(MaxVisibleSplats, 0));
+    Packet.bEnableClusterCulling = bEnableClusterCulling;
     Packet.MinProjectedRadiusPixels = bFullQuality ? 0.0f : MinProjectedRadiusPixels;
     Packet.MaxProjectedRadiusPixels = MaxProjectedRadiusPixels;
     Packet.AntialiasingFilterVariance = AntialiasingFilterVariance;

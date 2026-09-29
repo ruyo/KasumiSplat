@@ -274,6 +274,34 @@ namespace
         }
     }
 
+    void PackSHValues(
+        const void* Data,
+        int32 PointCount,
+        int32 CoefficientsPerPoint,
+        int32 Version,
+        TArray<uint32>& OutValues)
+    {
+        const int32 WordsPerPoint = FMath::DivideAndRoundUp(CoefficientsPerPoint, 2);
+        const int32 OutputOffset = OutValues.AddZeroed(PointCount * WordsPerPoint);
+        for (int32 PointIndex = 0; PointIndex < PointCount; ++PointIndex)
+        {
+            uint32* Target = OutValues.GetData() + OutputOffset + int64(PointIndex) * WordsPerPoint;
+            for (int32 CoefficientIndex = 0; CoefficientIndex < CoefficientsPerPoint; CoefficientIndex += 2)
+            {
+                const int64 ValueIndex = int64(PointIndex) * CoefficientsPerPoint + CoefficientIndex;
+                const uint32 Low = Version >= 2
+                    ? static_cast<const uint16*>(Data)[ValueIndex]
+                    : EncodeHalf(static_cast<const float*>(Data)[ValueIndex]);
+                const uint32 High = CoefficientIndex + 1 < CoefficientsPerPoint
+                    ? (Version >= 2
+                        ? uint32(static_cast<const uint16*>(Data)[ValueIndex + 1])
+                        : uint32(EncodeHalf(static_cast<const float*>(Data)[ValueIndex + 1])))
+                    : 0u;
+                Target[CoefficientIndex / 2] = Low | (High << 16u);
+            }
+        }
+    }
+
     struct FKasumiChunkLoadState
     {
         explicit FKasumiChunkLoadState(UKasumiSplatAsset* InAsset)
@@ -290,10 +318,10 @@ namespace
         }
 
         TStrongObjectPtr<UKasumiSplatAsset> Asset;
-        UKasumiSplatAsset::FChunkLoadCallback Callback;
+        UKasumiSplatAsset::FPackedChunkLoadCallback Callback;
         FCriticalSection Mutex;
         TArray<TArray<FKasumiSplatPoint>> Results;
-        TArray<TArray<float>> SHResults;
+        TArray<TArray<uint32>> SHResults;
         int32 SHCoefficientsPerPoint = 0;
         TArray<IBulkDataIORequest*> Requests;
         TAtomic<int32> Remaining = 0;
@@ -310,7 +338,7 @@ namespace
         Async(EAsyncExecution::ThreadPool, [State]() mutable
         {
             TArray<FKasumiSplatPoint> Combined;
-            TArray<float> CombinedSH;
+            TArray<uint32> CombinedSH;
             if (State->bSuccess.Load())
             {
                 int32 Total = 0;
@@ -319,14 +347,15 @@ namespace
                 for (TArray<FKasumiSplatPoint>& Chunk : State->Results) Combined.Append(MoveTemp(Chunk));
                 if (State->SHCoefficientsPerPoint > 0)
                 {
-                    CombinedSH.Reserve(Total * State->SHCoefficientsPerPoint);
-                    for (TArray<float>& Chunk : State->SHResults) CombinedSH.Append(MoveTemp(Chunk));
+                    const int32 WordsPerPoint = FMath::DivideAndRoundUp(State->SHCoefficientsPerPoint, 2);
+                    CombinedSH.Reserve(Total * WordsPerPoint);
+                    for (TArray<uint32>& Chunk : State->SHResults) CombinedSH.Append(MoveTemp(Chunk));
                 }
             }
             AsyncTask(ENamedThreads::GameThread,
                 [State, Combined = MoveTemp(Combined), CombinedSH = MoveTemp(CombinedSH)]() mutable
             {
-                UKasumiSplatAsset::FChunkLoadCallback Callback = MoveTemp(State->Callback);
+                UKasumiSplatAsset::FPackedChunkLoadCallback Callback = MoveTemp(State->Callback);
                 Callback(
                     State->bSuccess.Load(),
                     MoveTemp(Combined),
@@ -713,6 +742,35 @@ bool UKasumiSplatAsset::LoadHigherOrderSH(TArray<float>& OutHigherOrderSH) const
     return true;
 }
 
+bool UKasumiSplatAsset::LoadHigherOrderSHPacked(TArray<uint32>& OutPackedHigherOrderSH) const
+{
+    OutPackedHigherOrderSH.Reset();
+    const int32 CoefficientsPerPoint = GetHigherOrderSHCoefficientsPerPoint();
+    const int32 PointCount = GetPointCount();
+    if (CoefficientsPerPoint <= 0) return true;
+    if (PointCount <= 0 || int64(PointCount) * FMath::DivideAndRoundUp(CoefficientsPerPoint, 2) > MAX_int32)
+    {
+        return false;
+    }
+    if (HigherOrderSHBulkDataVersion <= 0)
+    {
+        if (HigherOrderSH.Num() != PointCount * CoefficientsPerPoint) return false;
+        PackSHValues(HigherOrderSH.GetData(), PointCount, CoefficientsPerPoint, 1, OutPackedHigherOrderSH);
+        return true;
+    }
+    const int64 ValueCount = int64(PointCount) * CoefficientsPerPoint;
+    if (HigherOrderSHBulkData.GetBulkDataSize() != ValueCount * SHStrideForVersion(HigherOrderSHBulkDataVersion))
+    {
+        return false;
+    }
+    FScopeLock BulkDataLock(&BulkDataCriticalSection);
+    const void* Source = HigherOrderSHBulkData.LockReadOnly();
+    if (!Source) return false;
+    PackSHValues(Source, PointCount, CoefficientsPerPoint, HigherOrderSHBulkDataVersion, OutPackedHigherOrderSH);
+    HigherOrderSHBulkData.Unlock();
+    return true;
+}
+
 bool UKasumiSplatAsset::LoadPointChunks(
     const TArray<int32>& ChunkIndices,
     TArray<FKasumiSplatPoint>& OutPoints,
@@ -820,9 +878,107 @@ bool UKasumiSplatAsset::LoadPointChunks(
     return true;
 }
 
+bool UKasumiSplatAsset::LoadPointChunksPacked(
+    const TArray<int32>& ChunkIndices,
+    TArray<FKasumiSplatPoint>& OutPoints,
+    TArray<uint32>* OutPackedHigherOrderSH) const
+{
+    if (OutPackedHigherOrderSH) OutPackedHigherOrderSH->Reset();
+    if (!LoadPointChunks(ChunkIndices, OutPoints, nullptr)) return false;
+    if (!OutPackedHigherOrderSH) return true;
+
+    const int32 CoefficientsPerPoint = GetHigherOrderSHCoefficientsPerPoint();
+    if (CoefficientsPerPoint <= 0) return true;
+    const int32 WordsPerPoint = FMath::DivideAndRoundUp(CoefficientsPerPoint, 2);
+    if (int64(OutPoints.Num()) * WordsPerPoint > MAX_int32) return false;
+    OutPackedHigherOrderSH->Reserve(OutPoints.Num() * WordsPerPoint);
+
+    if (HigherOrderSHBulkDataVersion > 0)
+    {
+        const int64 ExpectedSHBytes = int64(PackedPointCount) * CoefficientsPerPoint *
+            SHStrideForVersion(HigherOrderSHBulkDataVersion);
+        if (HigherOrderSHBulkData.GetBulkDataSize() != ExpectedSHBytes) return false;
+        FScopeLock BulkDataLock(&BulkDataCriticalSection);
+        const void* SH = HigherOrderSHBulkData.LockReadOnly();
+        if (!SH) return false;
+        for (const int32 ChunkIndex : ChunkIndices)
+        {
+            if (!Chunks.IsValidIndex(ChunkIndex))
+            {
+                HigherOrderSHBulkData.Unlock();
+                return false;
+            }
+            const FKasumiSplatChunk& Chunk = Chunks[ChunkIndex];
+            const int64 ValueOffset = int64(Chunk.FirstPoint) * CoefficientsPerPoint;
+            const uint8* ByteSource = static_cast<const uint8*>(SH) +
+                ValueOffset * SHStrideForVersion(HigherOrderSHBulkDataVersion);
+            PackSHValues(
+                ByteSource,
+                Chunk.PointCount,
+                CoefficientsPerPoint,
+                HigherOrderSHBulkDataVersion,
+                *OutPackedHigherOrderSH);
+        }
+        HigherOrderSHBulkData.Unlock();
+        return true;
+    }
+
+    for (const int32 ChunkIndex : ChunkIndices)
+    {
+        if (!Chunks.IsValidIndex(ChunkIndex)) return false;
+        const FKasumiSplatChunk& Chunk = Chunks[ChunkIndex];
+        const int64 Offset = int64(Chunk.FirstPoint) * CoefficientsPerPoint;
+        if (Offset + int64(Chunk.PointCount) * CoefficientsPerPoint > HigherOrderSH.Num()) return false;
+        PackSHValues(
+            HigherOrderSH.GetData() + Offset,
+            Chunk.PointCount,
+            CoefficientsPerPoint,
+            1,
+            *OutPackedHigherOrderSH);
+    }
+    return true;
+}
+
 void UKasumiSplatAsset::LoadPointChunksAsync(
     const TArray<int32>& ChunkIndices,
     FChunkLoadCallback&& Callback) const
+{
+    LoadPointChunksPackedAsync(ChunkIndices,
+        [Callback = MoveTemp(Callback)](
+            bool bSuccess,
+            TArray<FKasumiSplatPoint>&& Points,
+            TArray<uint32>&& PackedSH,
+            int32 CoefficientsPerPoint) mutable
+    {
+        TArray<float> ExpandedSH;
+        if (bSuccess && CoefficientsPerPoint > 0)
+        {
+            const int32 WordsPerPoint = FMath::DivideAndRoundUp(CoefficientsPerPoint, 2);
+            if (PackedSH.Num() != Points.Num() * WordsPerPoint)
+            {
+                bSuccess = false;
+            }
+            else
+            {
+                ExpandedSH.SetNumUninitialized(Points.Num() * CoefficientsPerPoint);
+                for (int32 PointIndex = 0; PointIndex < Points.Num(); ++PointIndex)
+                {
+                    for (int32 CoefficientIndex = 0; CoefficientIndex < CoefficientsPerPoint; ++CoefficientIndex)
+                    {
+                        const uint32 Word = PackedSH[int64(PointIndex) * WordsPerPoint + CoefficientIndex / 2];
+                        ExpandedSH[int64(PointIndex) * CoefficientsPerPoint + CoefficientIndex] = DecodeHalf(
+                            uint16(CoefficientIndex & 1 ? Word >> 16u : Word & 0xffffu));
+                    }
+                }
+            }
+        }
+        Callback(bSuccess, MoveTemp(Points), MoveTemp(ExpandedSH), CoefficientsPerPoint);
+    });
+}
+
+void UKasumiSplatAsset::LoadPointChunksPackedAsync(
+    const TArray<int32>& ChunkIndices,
+    FPackedChunkLoadCallback&& Callback) const
 {
     TArray<int32> ValidIndices;
     ValidIndices.Reserve(ChunkIndices.Num());
@@ -853,8 +1009,8 @@ void UKasumiSplatAsset::LoadPointChunksAsync(
             [StrongAsset = MoveTemp(StrongAsset), ValidIndices = MoveTemp(ValidIndices), Callback = MoveTemp(Callback)]() mutable
         {
             TArray<FKasumiSplatPoint> Loaded;
-            TArray<float> LoadedSH;
-            const bool bLoaded = StrongAsset->LoadPointChunks(ValidIndices, Loaded, &LoadedSH);
+            TArray<uint32> LoadedSH;
+            const bool bLoaded = StrongAsset->LoadPointChunksPacked(ValidIndices, Loaded, &LoadedSH);
             const int32 SHCount = StrongAsset->GetHigherOrderSHCoefficientsPerPoint();
             AsyncTask(ENamedThreads::GameThread,
                 [Callback = MoveTemp(Callback), bLoaded, Loaded = MoveTemp(Loaded), LoadedSH = MoveTemp(LoadedSH), SHCount]() mutable
@@ -880,8 +1036,8 @@ void UKasumiSplatAsset::LoadPointChunksAsync(
         Async(EAsyncExecution::ThreadPool, [State, ValidIndices = MoveTemp(ValidIndices)]() mutable
         {
             TArray<FKasumiSplatPoint> Loaded;
-            TArray<float> LoadedSH;
-            const bool bLoaded = State->Asset->LoadPointChunks(ValidIndices, Loaded, &LoadedSH);
+            TArray<uint32> LoadedSH;
+            const bool bLoaded = State->Asset->LoadPointChunksPacked(ValidIndices, Loaded, &LoadedSH);
             State->bSuccess = bLoaded;
             if (bLoaded) State->Results[0] = MoveTemp(Loaded);
             if (bLoaded) State->SHResults[0] = MoveTemp(LoadedSH);
@@ -953,7 +1109,12 @@ void UKasumiSplatAsset::LoadPointChunksAsync(
                 uint8* Memory = bWasCancelled ? nullptr : SHRequest->GetReadResults();
                 if (Memory)
                 {
-                    DecodeSHValues(Memory, ValueCount, SHVersion, State->SHResults[RequestIndex]);
+                    PackSHValues(
+                        Memory,
+                        ValueCount / State->SHCoefficientsPerPoint,
+                        State->SHCoefficientsPerPoint,
+                        SHVersion,
+                        State->SHResults[RequestIndex]);
                     FMemory::Free(Memory);
                 }
                 else

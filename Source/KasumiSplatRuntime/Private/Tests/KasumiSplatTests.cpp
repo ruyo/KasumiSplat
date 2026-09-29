@@ -92,6 +92,12 @@ bool FKasumiSplatPackedStorageTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("SH bulk data loads"), Asset->LoadHigherOrderSH(LoadedSH));
     TestEqual(TEXT("SH value count"), LoadedSH.Num(), 3);
     if (LoadedSH.Num() == 3) TestTrue(TEXT("SH value survives packing"), FMath::IsNearlyEqual(LoadedSH[1], -0.5f));
+    TArray<uint32> PackedSH;
+    TestTrue(TEXT("SH loads directly in the GPU word layout"), Asset->LoadHigherOrderSHPacked(PackedSH));
+    TestEqual(TEXT("Odd SH coefficient counts are padded per point"), PackedSH.Num(), 2);
+    TestTrue(TEXT("Direct GPU layout preserves the high half"), FMath::IsNearlyEqual(
+        ReadKasumiSplatPackedSH(PackedSH, 0, 1, 3), -0.5f));
+    TestEqual(TEXT("Unused high half is cleared"), PackedSH[1] >> 16u, 0u);
     return true;
 }
 
@@ -343,6 +349,7 @@ bool FKasumiSplatQualityPresetTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("Default tile size"), Component->TileSizePixels, 32);
     TestEqual(TEXT("Default tile overlap budget"), Component->MaxTilesPerSplat, 64);
     TestEqual(TEXT("Default point budget matches High quality"), Component->MaxVisibleSplats, 750000);
+    TestTrue(TEXT("Cluster culling is enabled by default"), Component->bEnableClusterCulling);
     TestEqual(TEXT("Full SH degree is the default"), Component->SHDegree, EKasumiSplatSHDegree::Degree3);
     TestEqual(TEXT("Needle suppression defaults to a conservative limit"), Component->MaxAnisotropy, 32.0f);
     TestEqual(TEXT("Oversized source splats are limited by default"), Component->MaxSplatSigmaCentimeters, 100.0f);
@@ -410,10 +417,28 @@ bool FKasumiSplatSHDegreeReductionTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("DC only output coefficient count"), DCOnlyCount, 0);
     TestTrue(TEXT("DC only releases higher-order SH storage"), DCOnlySH.IsEmpty());
 
+    TArray<uint32> PackedDegree1SH;
+    PackKasumiSplatSH(FullSH, PointCount, FullCoefficientCount, PackedDegree1SH);
+    int32 PackedDegree1Count = FullCoefficientCount;
+    ReduceKasumiSplatPackedSHDegree(
+        EKasumiSplatSHDegree::Degree1,
+        PointCount,
+        PackedDegree1Count,
+        PackedDegree1SH);
+    TestEqual(TEXT("Packed degree reduction keeps GPU word layout"), PackedDegree1SH.Num(), PointCount * 5);
+    TestTrue(TEXT("Packed degree reduction preserves channels"), FMath::IsNearlyEqual(
+        ReadKasumiSplatPackedSH(PackedDegree1SH, 0, 3, PackedDegree1Count),
+        200.0f,
+        0.1f));
+    TestTrue(TEXT("Packed degree reduction preserves point boundaries"), FMath::IsNearlyEqual(
+        ReadKasumiSplatPackedSH(PackedDegree1SH, 1, 0, PackedDegree1Count),
+        1100.0f,
+        1.0f));
+
     const int64 BaseBytes = EstimateKasumiSplatResidentBytesPerPoint(0);
-    TestEqual(TEXT("FP16 GPU packing uses two coefficients per word"),
+    TestEqual(TEXT("CPU and GPU share the packed FP16 word layout"),
         EstimateKasumiSplatResidentBytesPerPoint(45) - BaseBytes,
-        int64(45 * sizeof(float) + 23 * sizeof(uint32)));
+        int64(2 * 23 * sizeof(uint32)));
     TestTrue(TEXT("Degree 1 uses less estimated memory than Degree 2"),
         EstimateKasumiSplatResidentBytesPerPoint(9) < EstimateKasumiSplatResidentBytesPerPoint(24));
     TestTrue(TEXT("Degree 2 uses less estimated memory than Degree 3"),
@@ -500,11 +525,15 @@ bool FKasumiSplatTransitionSnapshotTest::RunTest(const FString& Parameters)
 
     FKasumiSplatResidentSnapshot Previous;
     Previous.Points = MakeShared<const TArray<FKasumiSplatPoint>, ESPMode::ThreadSafe>(PreviousPoints);
-    Previous.HigherOrderSH = MakeShared<const TArray<float>, ESPMode::ThreadSafe>(TArray<float>{10.0f, 20.0f});
+    TArray<uint32> PreviousPackedSH;
+    PackKasumiSplatSH(TArray<float>{10.0f, 20.0f}, 2, 1, PreviousPackedSH);
+    Previous.HigherOrderSH = MakeShared<const TArray<uint32>, ESPMode::ThreadSafe>(MoveTemp(PreviousPackedSH));
     Previous.HigherOrderSHCoefficientsPerPoint = 1;
     FKasumiSplatResidentSnapshot NewTarget;
     NewTarget.Points = MakeShared<const TArray<FKasumiSplatPoint>, ESPMode::ThreadSafe>(NewPoints);
-    NewTarget.HigherOrderSH = MakeShared<const TArray<float>, ESPMode::ThreadSafe>(TArray<float>{200.0f, 300.0f});
+    TArray<uint32> NewPackedSH;
+    PackKasumiSplatSH(TArray<float>{200.0f, 300.0f}, 2, 1, NewPackedSH);
+    NewTarget.HigherOrderSH = MakeShared<const TArray<uint32>, ESPMode::ThreadSafe>(MoveTemp(NewPackedSH));
     NewTarget.HigherOrderSHCoefficientsPerPoint = 1;
     const FKasumiSplatResidentSnapshot Merged =
         BuildKasumiSplatTransitionSnapshot(Previous, NewTarget);
@@ -523,9 +552,12 @@ bool FKasumiSplatTransitionSnapshotTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("SH remains aligned with the merged point order"), Merged.HigherOrderSH.IsValid());
     if (Merged.HigherOrderSH.IsValid())
     {
-        TestEqual(TEXT("Common point uses target SH"), (*Merged.HigherOrderSH)[0], 200.0f);
-        TestEqual(TEXT("Entering point uses target SH"), (*Merged.HigherOrderSH)[1], 300.0f);
-        TestEqual(TEXT("Leaving point keeps previous SH"), (*Merged.HigherOrderSH)[2], 10.0f);
+        TestTrue(TEXT("Common point uses target SH"), FMath::IsNearlyEqual(
+            ReadKasumiSplatPackedSH(*Merged.HigherOrderSH, 0, 0, 1), 200.0f, 0.1f));
+        TestTrue(TEXT("Entering point uses target SH"), FMath::IsNearlyEqual(
+            ReadKasumiSplatPackedSH(*Merged.HigherOrderSH, 1, 0, 1), 300.0f, 0.1f));
+        TestTrue(TEXT("Leaving point keeps previous SH"), FMath::IsNearlyEqual(
+            ReadKasumiSplatPackedSH(*Merged.HigherOrderSH, 2, 0, 1), 10.0f, 0.1f));
     }
     return true;
 }
@@ -650,6 +682,14 @@ bool FKasumiSplatLODTest::RunTest(const FString& Parameters)
     }
     TestTrue(TEXT("SH coefficients are opacity-weighted with the merge"),
         HigherOrderSH.Num() == 3 && FMath::IsNearlyEqual(HigherOrderSH[1], 12.5f, 1.e-5f));
+
+    TArray<FKasumiSplatPoint> PackedLODPoints = OriginalPoints;
+    TArray<uint32> PackedLOD;
+    PackKasumiSplatSH(OriginalSH, OriginalPoints.Num(), 1, PackedLOD);
+    ApplyKasumiSplatPackedLOD(2, 1, PackedLODPoints, PackedLOD);
+    TestEqual(TEXT("Packed LOD emits one GPU word per merged point"), PackedLOD.Num(), 3);
+    TestTrue(TEXT("Packed LOD keeps the opacity-weighted SH result"), FMath::IsNearlyEqual(
+        ReadKasumiSplatPackedSH(PackedLOD, 1, 0, 1), 12.5f, 0.01f));
 
     TArray<FKasumiSplatPoint> RepeatedPoints = OriginalPoints;
     TArray<float> RepeatedSH = OriginalSH;

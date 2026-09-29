@@ -15,7 +15,8 @@ enum class EKasumiSplatTransitionClass : uint8
 struct FKasumiSplatResidentSnapshot
 {
     TSharedPtr<const TArray<FKasumiSplatPoint>, ESPMode::ThreadSafe> Points;
-    TSharedPtr<const TArray<float>, ESPMode::ThreadSafe> HigherOrderSH;
+    /** Per-point GPU layout: two FP16 coefficients per uint32, padded to a word boundary. */
+    TSharedPtr<const TArray<uint32>, ESPMode::ThreadSafe> HigherOrderSH;
     TSharedPtr<const TArray<uint8>, ESPMode::ThreadSafe> TransitionClasses;
     int32 HigherOrderSHCoefficientsPerPoint = 0;
 };
@@ -23,7 +24,7 @@ struct FKasumiSplatResidentSnapshot
 struct FKasumiSplatStreamingState
 {
     TArray<FKasumiSplatPoint> SourcePoints;
-    TArray<float> SourceHigherOrderSH;
+    TArray<uint32> SourceHigherOrderSH;
     int32 SourceHigherOrderSHCoefficientsPerPoint = 0;
     FKasumiSplatResidentSnapshot RenderSnapshot;
     FKasumiSplatResidentSnapshot TargetSnapshot;
@@ -76,6 +77,24 @@ void ReduceKasumiSplatSHDegree(
     int32& InOutCoefficientsPerPoint,
     TArray<float>& InOutHigherOrderSH);
 
+void PackKasumiSplatSH(
+    TConstArrayView<float> HigherOrderSH,
+    int32 PointCount,
+    int32 CoefficientsPerPoint,
+    TArray<uint32>& OutPackedHigherOrderSH);
+
+float ReadKasumiSplatPackedSH(
+    TConstArrayView<uint32> PackedHigherOrderSH,
+    int32 PointIndex,
+    int32 CoefficientIndex,
+    int32 CoefficientsPerPoint);
+
+void ReduceKasumiSplatPackedSHDegree(
+    EKasumiSplatSHDegree Degree,
+    int32 PointCount,
+    int32& InOutCoefficientsPerPoint,
+    TArray<uint32>& InOutPackedHigherOrderSH);
+
 int32 ResolveKasumiSplatLODStride(
     double Distance,
     float LODStartDistance,
@@ -87,6 +106,12 @@ void ApplyKasumiSplatLOD(
     int32 SHCoefficientsPerPoint,
     TArray<FKasumiSplatPoint>& Points,
     TArray<float>& HigherOrderSH);
+
+void ApplyKasumiSplatPackedLOD(
+    int32 LODStride,
+    int32 SHCoefficientsPerPoint,
+    TArray<FKasumiSplatPoint>& Points,
+    TArray<uint32>& PackedHigherOrderSH);
 
 FKasumiSplatResidentSnapshot BuildKasumiSplatTransitionSnapshot(
     const FKasumiSplatResidentSnapshot& PreviousTarget,

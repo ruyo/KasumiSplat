@@ -22,12 +22,15 @@ struct FKasumiSplatRenderEntry
     uint64 LastDelayedTiledFallbackFrame = MAX_uint64;
     TRefCountPtr<FRDGPooledBuffer> PointBuffer;
     TRefCountPtr<FRDGPooledBuffer> SHBuffer;
+    TRefCountPtr<FRDGPooledBuffer> ClusterBoundsBuffer;
 };
 
 struct FKasumiSplatGPUData
 {
     FRDGBufferRef PointBuffer = nullptr;
     FRDGBufferRef SHBuffer = nullptr;
+    FRDGBufferRef ClusterBoundsBuffer = nullptr;
+    uint32 ClusterCount = 0;
 };
 
 FKasumiSplatGPUData GetOrCreateSplatGPUData(

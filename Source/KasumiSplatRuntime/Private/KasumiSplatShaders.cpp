@@ -1,6 +1,9 @@
 #include "KasumiSplatShaders.h"
 
 IMPLEMENT_GLOBAL_SHADER(FKasumiSplatCullCS, "/Plugin/KasumiSplat/Private/KasumiSplatProbe.usf", "CullCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FKasumiSplatInitializeClusterDispatchCS, "/Plugin/KasumiSplat/Private/KasumiSplatProbe.usf", "InitializeClusterDispatchCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FKasumiSplatClusterCullCS, "/Plugin/KasumiSplat/Private/KasumiSplatProbe.usf", "ClusterCullCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FKasumiSplatFinalizeClusterDispatchCS, "/Plugin/KasumiSplat/Private/KasumiSplatProbe.usf", "FinalizeClusterDispatchCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FKasumiSplatFinalizeTiledCS, "/Plugin/KasumiSplat/Private/KasumiSplatProbe.usf", "FinalizeTiledCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FKasumiSplatPrefixCS, "/Plugin/KasumiSplat/Private/KasumiSplatProbe.usf", "PrefixCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FKasumiSplatScatterCS, "/Plugin/KasumiSplat/Private/KasumiSplatProbe.usf", "ScatterCS", SF_Compute);

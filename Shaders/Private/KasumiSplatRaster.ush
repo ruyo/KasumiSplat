@@ -10,6 +10,25 @@ float2 QuadCorner(uint VertexId)
     return float2(1.0, 1.0);
 }
 
+bool TryCalculateKasumiVelocity(
+    float4 CurrentCenterClip,
+    float4 PreviousCenterClip,
+    out float3 Velocity)
+{
+    Velocity = 0.0;
+    if (CurrentCenterClip.w <= 0.01 || PreviousCenterClip.w <= 0.01)
+    {
+        return false;
+    }
+
+    Velocity = Calculate3DVelocity(CurrentCenterClip, PreviousCenterClip);
+    // A newly exposed or near-plane-crossing splat has no reliable one-frame correspondence.
+    // Leaving the scene velocity untouched is safer for TSR than encoding a screen-wide vector.
+    return all(Velocity == Velocity) &&
+        all(abs(Velocity.xy) <= 0.5.xx) &&
+        abs(Velocity.z) <= 1.0;
+}
+
 FKasumiVertexOutput MainVS(uint VertexId : SV_VertexID, uint InstanceId : SV_InstanceID)
 {
     FKasumiVertexOutput Output;
@@ -175,7 +194,12 @@ ENCODED_VELOCITY_TYPE VelocityPS(FKasumiVertexOutput Input) : SV_Target0
         }
     }
 
-    return EncodeVelocityToTexture(Calculate3DVelocity(Input.CurrentCenterClip, Input.PreviousCenterClip));
+    float3 Velocity;
+    if (!TryCalculateKasumiVelocity(Input.CurrentCenterClip, Input.PreviousCenterClip, Velocity))
+    {
+        discard;
+    }
+    return EncodeVelocityToTexture(Velocity);
 }
 
 float4 GroupPS(FKasumiVertexOutput Input) : SV_Target0
@@ -231,5 +255,10 @@ ENCODED_VELOCITY_TYPE GroupVelocityPS(FKasumiVertexOutput Input) : SV_Target0
             discard;
         }
     }
-    return EncodeVelocityToTexture(Calculate3DVelocity(Input.CurrentCenterClip, Input.PreviousCenterClip));
+    float3 Velocity;
+    if (!TryCalculateKasumiVelocity(Input.CurrentCenterClip, Input.PreviousCenterClip, Velocity))
+    {
+        discard;
+    }
+    return EncodeVelocityToTexture(Velocity);
 }

@@ -7,6 +7,72 @@
 
 inline constexpr uint32 KasumiMaxEffectLayers = KasumiSplatConfig::MaxEffectLayers;
 
+class FKasumiSplatInitializeClusterDispatchCS : public FGlobalShader
+{
+public:
+    DECLARE_GLOBAL_SHADER(FKasumiSplatInitializeClusterDispatchCS);
+    SHADER_USE_PARAMETER_STRUCT(FKasumiSplatInitializeClusterDispatchCS, FGlobalShader);
+
+    BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+        SHADER_PARAMETER(uint32, SourceWorkgroupCount)
+        SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWVisibleClusterWorkgroups)
+        SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWClusterDispatchArgs)
+        SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWClusterCullFallback)
+    END_SHADER_PARAMETER_STRUCT()
+
+    static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+    {
+        return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM6);
+    }
+};
+
+class FKasumiSplatClusterCullCS : public FGlobalShader
+{
+public:
+    DECLARE_GLOBAL_SHADER(FKasumiSplatClusterCullCS);
+    SHADER_USE_PARAMETER_STRUCT(FKasumiSplatClusterCullCS, FGlobalShader);
+
+    BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ClusterBounds)
+        SHADER_PARAMETER(FMatrix44f, LocalToWorld)
+        SHADER_PARAMETER(FMatrix44f, WorldToClip)
+        SHADER_PARAMETER(FVector2f, ViewSize)
+        SHADER_PARAMETER(float, RadiusScale)
+        SHADER_PARAMETER(float, RadiusInflation)
+        SHADER_PARAMETER(float, MinProjectedRadiusPixels)
+        SHADER_PARAMETER(uint32, ClusterCount)
+        SHADER_PARAMETER(uint32, ClusterPointCount)
+        SHADER_PARAMETER(uint32, SourcePointCount)
+        SHADER_PARAMETER(uint32, BuildIndirectWorkgroups)
+        SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWClusterVisibility)
+        SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWVisibleClusterWorkgroups)
+        SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWClusterDispatchArgs)
+    END_SHADER_PARAMETER_STRUCT()
+
+    static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+    {
+        return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM6);
+    }
+};
+
+class FKasumiSplatFinalizeClusterDispatchCS : public FGlobalShader
+{
+public:
+    DECLARE_GLOBAL_SHADER(FKasumiSplatFinalizeClusterDispatchCS);
+    SHADER_USE_PARAMETER_STRUCT(FKasumiSplatFinalizeClusterDispatchCS, FGlobalShader);
+
+    BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+        SHADER_PARAMETER(uint32, SourceWorkgroupCount)
+        SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWClusterDispatchArgs)
+        SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWClusterCullFallback)
+    END_SHADER_PARAMETER_STRUCT()
+
+    static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+    {
+        return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM6);
+    }
+};
+
 class FKasumiSplatCullCS : public FGlobalShader
 {
 public:
@@ -16,6 +82,9 @@ public:
     BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
         SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, PointData)
         SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, SHData)
+        SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, ClusterVisibility)
+        SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, VisibleClusterWorkgroups)
+        SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, ClusterCullFallback)
         SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
         SHADER_PARAMETER(FMatrix44f, LocalToWorld)
         SHADER_PARAMETER(FMatrix44f, WorldToClip)
@@ -61,6 +130,10 @@ public:
         SHADER_PARAMETER(uint32, Seed)
         SHADER_PARAMETER(uint32, PointCount)
         SHADER_PARAMETER(uint32, SourcePointCount)
+        SHADER_PARAMETER(uint32, ClusterPointCount)
+        SHADER_PARAMETER(uint32, ClusterCount)
+        SHADER_PARAMETER(uint32, UseClusterCulling)
+        SHADER_PARAMETER(uint32, UseCompactedClusterDispatch)
         SHADER_PARAMETER(uint32, UseLogDepthSort)
         SHADER_PARAMETER(uint32, SortPath)
         SHADER_PARAMETER(uint32, EnableTiledFallback)

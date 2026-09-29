@@ -13,7 +13,7 @@ struct FKasumiSplatPacket
     FTransform LocalToWorld;
     FBox LocalBounds = FBox(ForceInit);
     TSharedPtr<const TArray<FKasumiSplatPoint>, ESPMode::ThreadSafe> Points;
-    TSharedPtr<const TArray<float>, ESPMode::ThreadSafe> HigherOrderSH;
+    TSharedPtr<const TArray<uint32>, ESPMode::ThreadSafe> HigherOrderSH;
     TSharedPtr<const TArray<uint8>, ESPMode::ThreadSafe> TransitionClasses;
     uint32 HigherOrderSHCoefficientsPerPoint = 0;
     float TemporalTransitionAlpha = 1.0f;
@@ -32,6 +32,7 @@ struct FKasumiSplatPacket
     uint32 TiledPairBudgetMB = 256;
     EKasumiSplatTiledFallbackMode TiledFallbackMode = EKasumiSplatTiledFallbackMode::SameFrame;
     uint32 MaxVisibleSplats = 750000;
+    bool bEnableClusterCulling = true;
     float MinProjectedRadiusPixels = 0.25f;
     float MaxProjectedRadiusPixels = 1024.0f;
     float AntialiasingFilterVariance = 0.3f;

@@ -8,7 +8,11 @@
 
 StructuredBuffer<float4> PointData;
 StructuredBuffer<uint> SHData;
+StructuredBuffer<float4> ClusterBounds;
 StructuredBuffer<float4> GroupRecordData;
+Buffer<uint> ClusterVisibility;
+Buffer<uint> VisibleClusterWorkgroups;
+Buffer<uint> ClusterCullFallback;
 Buffer<uint> VisibilityBuckets;
 Buffer<uint> ExactValues;
 Buffer<uint> BucketCounts;
@@ -28,6 +32,10 @@ RWBuffer<uint> RWExactValues;
 RWBuffer<uint> RWTileKeys;
 RWBuffer<uint> RWTileValues;
 RWStructuredBuffer<float4> RWGroupRecordData;
+RWBuffer<uint> RWClusterVisibility;
+RWBuffer<uint> RWVisibleClusterWorkgroups;
+RWBuffer<uint> RWClusterDispatchArgs;
+RWBuffer<uint> RWClusterCullFallback;
 
 float4x4 LocalToWorld;
 float4x4 WorldToClip;
@@ -58,6 +66,15 @@ uint UseSceneDepth;
 uint Seed;
 uint PointCount;
 uint SourcePointCount;
+uint SourceWorkgroupCount;
+uint ClusterPointCount;
+uint ClusterCount;
+uint UseClusterCulling;
+uint UseCompactedClusterDispatch;
+uint BuildIndirectWorkgroups;
+float RadiusScale;
+float RadiusInflation;
+float MinProjectedRadiusPixels;
 uint UseLogDepthSort;
 uint SortPath;
 uint EnableTiledFallback;

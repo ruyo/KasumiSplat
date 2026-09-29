@@ -1,7 +1,95 @@
 [numthreads(64, 1, 1)]
-void CullCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+void InitializeClusterDispatchCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 {
-    const uint SampleIndex = DispatchThreadId.x;
+    const uint WorkgroupIndex = DispatchThreadId.x;
+    if (WorkgroupIndex < SourceWorkgroupCount)
+    {
+        RWVisibleClusterWorkgroups[WorkgroupIndex] = WorkgroupIndex;
+    }
+    if (WorkgroupIndex == 0u)
+    {
+        RWClusterDispatchArgs[0] = 0u;
+        RWClusterDispatchArgs[1] = 1u;
+        RWClusterDispatchArgs[2] = 1u;
+        RWClusterCullFallback[0] = 0u;
+    }
+}
+
+[numthreads(64, 1, 1)]
+void ClusterCullCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    const uint ClusterIndex = DispatchThreadId.x;
+    if (ClusterIndex >= ClusterCount)
+    {
+        return;
+    }
+
+    const float4 Bounds = ClusterBounds[ClusterIndex];
+    const float Radius = max(Bounds.w * max(RadiusScale, 0.0) + max(RadiusInflation, 0.0), 0.0);
+    const float4 CenterClip = mul(mul(float4(Bounds.xyz, 1.0), LocalToWorld), WorldToClip);
+    const float4 AxisX = mul(mul(float4(Radius, 0.0, 0.0, 0.0), LocalToWorld), WorldToClip);
+    const float4 AxisY = mul(mul(float4(0.0, Radius, 0.0, 0.0), LocalToWorld), WorldToClip);
+    const float4 AxisZ = mul(mul(float4(0.0, 0.0, Radius, 0.0), LocalToWorld), WorldToClip);
+    const float4 ExtentClip = abs(AxisX) + abs(AxisY) + abs(AxisZ);
+    const float PlaneExtentX = ExtentClip.x + ExtentClip.w;
+    const float PlaneExtentY = ExtentClip.y + ExtentClip.w;
+    const float PlaneExtentZ = ExtentClip.z + ExtentClip.w;
+    bool bVisible =
+        CenterClip.w + ExtentClip.w > 0.01 &&
+        CenterClip.x + CenterClip.w + PlaneExtentX >= 0.0 &&
+        CenterClip.w - CenterClip.x + PlaneExtentX >= 0.0 &&
+        CenterClip.y + CenterClip.w + PlaneExtentY >= 0.0 &&
+        CenterClip.w - CenterClip.y + PlaneExtentY >= 0.0 &&
+        CenterClip.z + ExtentClip.z >= 0.0 &&
+        CenterClip.w - CenterClip.z + PlaneExtentZ >= 0.0;
+
+    const float MinimumW = CenterClip.w - ExtentClip.w;
+    if (bVisible && MinProjectedRadiusPixels > 0.0 && MinimumW > 0.01)
+    {
+        const float2 Numerator =
+            ExtentClip.xy * abs(CenterClip.w) + abs(CenterClip.xy) * ExtentClip.w;
+        const float2 NdcRadius = Numerator / max(abs(CenterClip.w) * MinimumW, 1.0e-6);
+        const float ProjectedRadius = max(NdcRadius.x * ViewSize.x, NdcRadius.y * ViewSize.y) * 0.5;
+        bVisible = ProjectedRadius >= MinProjectedRadiusPixels;
+    }
+    RWClusterVisibility[ClusterIndex] = bVisible ? 1u : 0u;
+    if (bVisible && BuildIndirectWorkgroups != 0u)
+    {
+        const uint FirstPoint = ClusterIndex * ClusterPointCount;
+        const uint ClusterSourcePointCount = min(ClusterPointCount, SourcePointCount - FirstPoint);
+        const uint FirstWorkgroup = FirstPoint / 64u;
+        const uint WorkgroupCount = (ClusterSourcePointCount + 63u) / 64u;
+        uint OutputOffset;
+        InterlockedAdd(RWClusterDispatchArgs[0], WorkgroupCount, OutputOffset);
+        [loop]
+        for (uint WorkgroupOffset = 0u; WorkgroupOffset < WorkgroupCount; ++WorkgroupOffset)
+        {
+            RWVisibleClusterWorkgroups[OutputOffset + WorkgroupOffset] = FirstWorkgroup + WorkgroupOffset;
+        }
+    }
+}
+
+[numthreads(1, 1, 1)]
+void FinalizeClusterDispatchCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (RWClusterDispatchArgs[0] == 0u)
+    {
+        // A conservative full dispatch prevents a transient all-cluster rejection from
+        // suppressing the per-point visibility pass for the entire frame.
+        RWClusterDispatchArgs[0] = SourceWorkgroupCount;
+        RWClusterCullFallback[0] = 1u;
+    }
+}
+
+[numthreads(64, 1, 1)]
+void CullCS(
+    uint3 DispatchThreadId : SV_DispatchThreadID,
+    uint3 GroupId : SV_GroupID,
+    uint3 GroupThreadId : SV_GroupThreadID)
+{
+    const uint SampleIndex = UseCompactedClusterDispatch != 0u
+        ? VisibleClusterWorkgroups[GroupId.x] * 64u + GroupThreadId.x
+        : DispatchThreadId.x;
     if (SampleIndex >= PointCount)
     {
         return;
@@ -10,6 +98,32 @@ void CullCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     const uint Remainder = SourcePointCount % PointCount;
     const uint GroupStart = SampleIndex * BaseCount + min(SampleIndex, Remainder);
     const uint GroupCount = BaseCount + (SampleIndex < Remainder ? 1u : 0u);
+    const uint OutputIndex = GroupOutputBase + SampleIndex;
+    if (UseClusterCulling != 0u && ClusterCount > 0u && ClusterCullFallback[0] == 0u)
+    {
+        const uint FirstCluster = min(GroupStart / ClusterPointCount, ClusterCount - 1u);
+        const uint LastCluster = min((GroupStart + GroupCount - 1u) / ClusterPointCount, ClusterCount - 1u);
+        bool bAnyClusterVisible = false;
+        [loop]
+        for (uint ClusterIndex = FirstCluster; ClusterIndex <= LastCluster; ++ClusterIndex)
+        {
+            bAnyClusterVisible = bAnyClusterVisible || ClusterVisibility[ClusterIndex] != 0u;
+        }
+        if (!bAnyClusterVisible)
+        {
+            if (SortPath == 0u)
+            {
+                RWVisibilityBuckets[SampleIndex] = KASUMI_INVALID_BUCKET;
+                RWExactValues[SampleIndex] = GroupStart;
+            }
+            else if (SortPath == 1u || EnableTiledFallback != 0u)
+            {
+                RWExactKeys[OutputIndex] = 0xffffffffu;
+                RWExactValues[OutputIndex] = 0xffffffffu;
+            }
+            return;
+        }
+    }
     uint PointIndex = GroupStart;
     float BestImportance = -3.402823466e+38;
     float4 CenterClip = 0.0;
@@ -178,7 +292,6 @@ void CullCS(uint3 DispatchThreadId : SV_DispatchThreadID)
             }
         }
     }
-    const uint OutputIndex = GroupOutputBase + SampleIndex;
     if (WriteGroupRecords != 0u && bVisible)
     {
         float4 SourceColor = PointData[PointIndex * 4u + 3u];
@@ -225,11 +338,6 @@ void CullCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     {
         RWExactKeys[OutputIndex] = ExactKey;
         RWExactValues[OutputIndex] = WriteGroupRecords != 0u ? OutputIndex : PointIndex;
-    }
-    if (SampleIndex == 0u)
-    {
-        RWDrawIndirectArgs[0] = 6u;
-        RWTileDrawIndirectArgs[0] = 6u;
     }
 }
 

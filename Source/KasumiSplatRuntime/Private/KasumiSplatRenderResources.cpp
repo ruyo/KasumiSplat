@@ -1,6 +1,6 @@
 #include "KasumiSplatRenderResources.h"
 
-#include "Math/Float16.h"
+#include "KasumiSplatConfiguration.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphUtils.h"
 
@@ -9,13 +9,14 @@ FKasumiSplatGPUData GetOrCreateSplatGPUData(
     FKasumiSplatRenderEntry& Entry)
 {
     FKasumiSplatGPUData Result;
+    const TArray<FKasumiSplatPoint>& Points = *Entry.Packet.Points;
+    Result.ClusterCount = FMath::DivideAndRoundUp(uint32(Points.Num()), KasumiSplatConfig::ClusterPointCount);
     if (Entry.PointBuffer.IsValid())
     {
         Result.PointBuffer = GraphBuilder.RegisterExternalBuffer(Entry.PointBuffer, TEXT("KasumiSplat.Points"));
     }
     else
     {
-        const TArray<FKasumiSplatPoint>& Points = *Entry.Packet.Points;
         const bool bHasTransitionClasses = Entry.Packet.TransitionClasses.IsValid() &&
             Entry.Packet.TransitionClasses->Num() == Points.Num();
         TArray<FVector4f> PackedPoints;
@@ -43,40 +44,69 @@ FKasumiSplatGPUData GetOrCreateSplatGPUData(
         GraphBuilder.QueueBufferExtraction(Result.PointBuffer, &Entry.PointBuffer);
     }
 
+    if (Entry.ClusterBoundsBuffer.IsValid())
+    {
+        Result.ClusterBoundsBuffer = GraphBuilder.RegisterExternalBuffer(
+            Entry.ClusterBoundsBuffer,
+            TEXT("KasumiSplat.ClusterBounds"));
+    }
+    else
+    {
+        TArray<FVector4f> ClusterBounds;
+        ClusterBounds.SetNumUninitialized(FMath::Max(Result.ClusterCount, 1u));
+        for (uint32 ClusterIndex = 0; ClusterIndex < Result.ClusterCount; ++ClusterIndex)
+        {
+            const int32 FirstPoint = int32(ClusterIndex * KasumiSplatConfig::ClusterPointCount);
+            const int32 EndPoint = FMath::Min(
+                FirstPoint + int32(KasumiSplatConfig::ClusterPointCount),
+                Points.Num());
+            FBox PositionBounds(ForceInit);
+            for (int32 PointIndex = FirstPoint; PointIndex < EndPoint; ++PointIndex)
+            {
+                PositionBounds += Points[PointIndex].Position;
+            }
+            const FVector Center = PositionBounds.GetCenter();
+            double Radius = 0.0;
+            for (int32 PointIndex = FirstPoint; PointIndex < EndPoint; ++PointIndex)
+            {
+                const FKasumiSplatPoint& Point = Points[PointIndex];
+                const double SplatRadius = 3.0 * Point.Sigma.GetAbs().GetMax();
+                Radius = FMath::Max(Radius, FVector::Distance(Center, Point.Position) + SplatRadius);
+            }
+            ClusterBounds[ClusterIndex] = FVector4f(FVector3f(Center), float(Radius));
+        }
+        if (Result.ClusterCount == 0)
+        {
+            ClusterBounds[0] = FVector4f::Zero();
+        }
+        Result.ClusterBoundsBuffer = CreateStructuredBuffer(
+            GraphBuilder,
+            TEXT("KasumiSplat.ClusterBoundsUpload"),
+            ClusterBounds);
+        GraphBuilder.QueueBufferExtraction(Result.ClusterBoundsBuffer, &Entry.ClusterBoundsBuffer);
+    }
+
     if (Entry.SHBuffer.IsValid())
     {
         Result.SHBuffer = GraphBuilder.RegisterExternalBuffer(Entry.SHBuffer, TEXT("KasumiSplat.HigherOrderSH"));
     }
     else
     {
-        const TArray<FKasumiSplatPoint>& Points = *Entry.Packet.Points;
-        TArray<uint32> PackedSH;
         const int32 SHCount = int32(Entry.Packet.HigherOrderSHCoefficientsPerPoint);
         const int32 SHWordsPerPoint = FMath::DivideAndRoundUp(SHCount, 2);
         if (SHCount > 0 && Entry.Packet.HigherOrderSH.IsValid() &&
-            Entry.Packet.HigherOrderSH->Num() == Points.Num() * SHCount)
+            Entry.Packet.HigherOrderSH->Num() == Points.Num() * SHWordsPerPoint)
         {
-            PackedSH.SetNumZeroed(Points.Num() * SHWordsPerPoint);
-            for (int32 PointIndex = 0; PointIndex < Points.Num(); ++PointIndex)
-            {
-                const float* Source = Entry.Packet.HigherOrderSH->GetData() + int64(PointIndex) * SHCount;
-                uint32* Target = PackedSH.GetData() + int64(PointIndex) * SHWordsPerPoint;
-                for (int32 CoefficientIndex = 0; CoefficientIndex < SHCount; CoefficientIndex += 2)
-                {
-                    const uint32 Low = FFloat16(Source[CoefficientIndex]).Encoded;
-                    const uint32 High = CoefficientIndex + 1 < SHCount
-                        ? uint32(FFloat16(Source[CoefficientIndex + 1]).Encoded)
-                        : 0u;
-                    Target[CoefficientIndex / 2] = Low | (High << 16u);
-                }
-            }
+            Result.SHBuffer = CreateStructuredBuffer(
+                GraphBuilder,
+                TEXT("KasumiSplat.SHUpload"),
+                *Entry.Packet.HigherOrderSH);
         }
         else
         {
-            PackedSH.Add(0u);
+            const TArray<uint32> DummySH{0u};
+            Result.SHBuffer = CreateStructuredBuffer(GraphBuilder, TEXT("KasumiSplat.SHUpload"), DummySH);
         }
-
-        Result.SHBuffer = CreateStructuredBuffer(GraphBuilder, TEXT("KasumiSplat.SHUpload"), PackedSH);
         GraphBuilder.QueueBufferExtraction(Result.SHBuffer, &Entry.SHBuffer);
     }
     return Result;

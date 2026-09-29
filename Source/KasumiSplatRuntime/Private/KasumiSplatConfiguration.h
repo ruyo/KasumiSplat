@@ -7,6 +7,7 @@ namespace KasumiSplatConfig
     inline constexpr uint32 MaxEffectLayers = 4;
     inline constexpr uint32 DepthBucketCount = 4096;
     inline constexpr uint32 CullGroupSize = 64;
+    inline constexpr uint32 ClusterPointCount = 256;
     inline constexpr uint32 TileCapacity = 256;
     inline constexpr uint32 AutoTiledThreshold = 750000;
     inline constexpr uint32 MinTileSizePixels = 16;

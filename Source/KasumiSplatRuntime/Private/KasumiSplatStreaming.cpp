@@ -1,6 +1,7 @@
 #include "KasumiSplatStreaming.h"
 
 #include "KasumiSplatAsset.h"
+#include "Math/Float16.h"
 
 namespace
 {
@@ -111,6 +112,31 @@ namespace
         Hash |= 0x80000000u;
         if (Hash == uint32(INDEX_NONE)) Hash ^= 0x01010101u;
         return int32(Hash);
+    }
+
+    uint16 ReadPackedSHHalfUnchecked(
+        TConstArrayView<uint32> PackedHigherOrderSH,
+        int32 PointIndex,
+        int32 CoefficientIndex,
+        int32 CoefficientsPerPoint)
+    {
+        const int32 WordsPerPoint = FMath::DivideAndRoundUp(CoefficientsPerPoint, 2);
+        const uint32 Word = PackedHigherOrderSH[int64(PointIndex) * WordsPerPoint + CoefficientIndex / 2];
+        return uint16(CoefficientIndex & 1 ? Word >> 16u : Word & 0xffffu);
+    }
+
+    void AppendPackedSHValues(TConstArrayView<float> Values, TArray<uint32>& OutPackedHigherOrderSH)
+    {
+        const int32 OutputOffset = OutPackedHigherOrderSH.AddZeroed(FMath::DivideAndRoundUp(Values.Num(), 2));
+        uint32* Target = OutPackedHigherOrderSH.GetData() + OutputOffset;
+        for (int32 CoefficientIndex = 0; CoefficientIndex < Values.Num(); CoefficientIndex += 2)
+        {
+            const uint32 Low = FFloat16(Values[CoefficientIndex]).Encoded;
+            const uint32 High = CoefficientIndex + 1 < Values.Num()
+                ? uint32(FFloat16(Values[CoefficientIndex + 1]).Encoded)
+                : 0u;
+            Target[CoefficientIndex / 2] = Low | (High << 16u);
+        }
     }
 }
 
@@ -241,9 +267,8 @@ FKasumiSplatStreamingSelection BuildKasumiSplatStreamingSelection(
 int64 EstimateKasumiSplatResidentBytesPerPoint(int32 HigherOrderSHCoefficientsPerPoint)
 {
     const int64 SHCount = FMath::Max(0, HigherOrderSHCoefficientsPerPoint);
-    const int64 CpuSHBytes = SHCount * sizeof(float);
-    const int64 GpuSHBytes = FMath::DivideAndRoundUp(SHCount, int64(2)) * sizeof(uint32);
-    return sizeof(FKasumiSplatPoint) + 4 * sizeof(FVector4f) + CpuSHBytes + GpuSHBytes;
+    const int64 PackedSHBytes = FMath::DivideAndRoundUp(SHCount, int64(2)) * sizeof(uint32);
+    return sizeof(FKasumiSplatPoint) + 4 * sizeof(FVector4f) + 2 * PackedSHBytes;
 }
 
 int32 ResolveKasumiSplatSHCoefficientsPerPoint(
@@ -297,6 +322,92 @@ void ReduceKasumiSplatSHDegree(
         }
     }
     InOutHigherOrderSH = MoveTemp(Reduced);
+    InOutCoefficientsPerPoint = TargetCount;
+}
+
+void PackKasumiSplatSH(
+    TConstArrayView<float> HigherOrderSH,
+    int32 PointCount,
+    int32 CoefficientsPerPoint,
+    TArray<uint32>& OutPackedHigherOrderSH)
+{
+    OutPackedHigherOrderSH.Reset();
+    if (PointCount <= 0 || CoefficientsPerPoint <= 0 ||
+        int64(HigherOrderSH.Num()) != int64(PointCount) * CoefficientsPerPoint)
+    {
+        return;
+    }
+    const int32 WordsPerPoint = FMath::DivideAndRoundUp(CoefficientsPerPoint, 2);
+    OutPackedHigherOrderSH.Reserve(PointCount * WordsPerPoint);
+    for (int32 PointIndex = 0; PointIndex < PointCount; ++PointIndex)
+    {
+        const float* Source = HigherOrderSH.GetData() + int64(PointIndex) * CoefficientsPerPoint;
+        AppendPackedSHValues(MakeArrayView(Source, CoefficientsPerPoint), OutPackedHigherOrderSH);
+    }
+}
+
+float ReadKasumiSplatPackedSH(
+    TConstArrayView<uint32> PackedHigherOrderSH,
+    int32 PointIndex,
+    int32 CoefficientIndex,
+    int32 CoefficientsPerPoint)
+{
+    if (PointIndex < 0 || CoefficientIndex < 0 || CoefficientIndex >= CoefficientsPerPoint)
+    {
+        return 0.0f;
+    }
+    const int32 WordsPerPoint = FMath::DivideAndRoundUp(CoefficientsPerPoint, 2);
+    const int64 WordIndex = int64(PointIndex) * WordsPerPoint + CoefficientIndex / 2;
+    if (!PackedHigherOrderSH.IsValidIndex(WordIndex)) return 0.0f;
+    FFloat16 Value;
+    Value.Encoded = ReadPackedSHHalfUnchecked(
+        PackedHigherOrderSH,
+        PointIndex,
+        CoefficientIndex,
+        CoefficientsPerPoint);
+    return Value.GetFloat();
+}
+
+void ReduceKasumiSplatPackedSHDegree(
+    EKasumiSplatSHDegree Degree,
+    int32 PointCount,
+    int32& InOutCoefficientsPerPoint,
+    TArray<uint32>& InOutPackedHigherOrderSH)
+{
+    const int32 SourceCount = InOutCoefficientsPerPoint;
+    const int32 TargetCount = ResolveKasumiSplatSHCoefficientsPerPoint(Degree, SourceCount);
+    const int32 SourceWordsPerPoint = FMath::DivideAndRoundUp(SourceCount, 2);
+    if (TargetCount <= 0 || PointCount <= 0 ||
+        int64(InOutPackedHigherOrderSH.Num()) != int64(PointCount) * SourceWordsPerPoint)
+    {
+        InOutPackedHigherOrderSH.Reset();
+        InOutCoefficientsPerPoint = 0;
+        return;
+    }
+    if (TargetCount == SourceCount) return;
+
+    const int32 SourcePerChannel = SourceCount / 3;
+    const int32 TargetPerChannel = TargetCount / 3;
+    const int32 TargetWordsPerPoint = FMath::DivideAndRoundUp(TargetCount, 2);
+    TArray<uint32> Reduced;
+    Reduced.SetNumZeroed(PointCount * TargetWordsPerPoint);
+    for (int32 PointIndex = 0; PointIndex < PointCount; ++PointIndex)
+    {
+        uint32* Target = Reduced.GetData() + int64(PointIndex) * TargetWordsPerPoint;
+        for (int32 TargetCoefficient = 0; TargetCoefficient < TargetCount; ++TargetCoefficient)
+        {
+            const int32 Channel = TargetCoefficient / TargetPerChannel;
+            const int32 CoefficientInChannel = TargetCoefficient % TargetPerChannel;
+            const int32 SourceCoefficient = Channel * SourcePerChannel + CoefficientInChannel;
+            const uint32 Half = ReadPackedSHHalfUnchecked(
+                InOutPackedHigherOrderSH,
+                PointIndex,
+                SourceCoefficient,
+                SourceCount);
+            Target[TargetCoefficient / 2] |= Half << ((TargetCoefficient & 1) * 16u);
+        }
+    }
+    InOutPackedHigherOrderSH = MoveTemp(Reduced);
     InOutCoefficientsPerPoint = TargetCount;
 }
 
@@ -402,6 +513,117 @@ void ApplyKasumiSplatLOD(
     HigherOrderSH = MoveTemp(MergedSH);
 }
 
+void ApplyKasumiSplatPackedLOD(
+    int32 LODStride,
+    int32 SHCoefficientsPerPoint,
+    TArray<FKasumiSplatPoint>& Points,
+    TArray<uint32>& PackedHigherOrderSH)
+{
+    if (LODStride <= 1) return;
+
+    const int32 SHWordsPerPoint = FMath::DivideAndRoundUp(SHCoefficientsPerPoint, 2);
+    const bool bHasMatchingSH = SHCoefficientsPerPoint > 0 &&
+        PackedHigherOrderSH.Num() == Points.Num() * SHWordsPerPoint;
+    TArray<FKasumiSplatPoint> MergedPoints;
+    TArray<uint32> MergedSH;
+    MergedPoints.Reserve(FMath::DivideAndRoundUp(Points.Num(), LODStride));
+    if (bHasMatchingSH)
+    {
+        MergedSH.Reserve(FMath::DivideAndRoundUp(Points.Num(), LODStride) * SHWordsPerPoint);
+    }
+    for (int32 GroupStart = 0; GroupStart < Points.Num(); GroupStart += LODStride)
+    {
+        const int32 GroupEnd = FMath::Min(GroupStart + LODStride, Points.Num());
+        if (GroupEnd - GroupStart == 1)
+        {
+            MergedPoints.Add(Points[GroupStart]);
+            if (bHasMatchingSH)
+            {
+                MergedSH.Append(
+                    PackedHigherOrderSH.GetData() + int64(GroupStart) * SHWordsPerPoint,
+                    SHWordsPerPoint);
+            }
+            continue;
+        }
+        double WeightSum = 0.0;
+        double Transmittance = 1.0;
+        FVector Mean = FVector::ZeroVector;
+        FVector3d WeightedColor = FVector3d::ZeroVector;
+        for (int32 PointIndex = GroupStart; PointIndex < GroupEnd; ++PointIndex)
+        {
+            const FKasumiSplatPoint& Point = Points[PointIndex];
+            const double Alpha = FMath::Clamp(double(Point.Color.A), 0.0, 1.0);
+            const double Weight = FMath::Max(Alpha, 1.0e-6);
+            WeightSum += Weight;
+            Mean += Point.Position * Weight;
+            WeightedColor += FVector3d(Point.Color.R, Point.Color.G, Point.Color.B) * Weight;
+            Transmittance *= 1.0 - Alpha;
+        }
+        Mean /= WeightSum;
+
+        FKasumiCovariance3 MergedCovariance;
+        for (int32 PointIndex = GroupStart; PointIndex < GroupEnd; ++PointIndex)
+        {
+            const FKasumiSplatPoint& Point = Points[PointIndex];
+            const double Weight = FMath::Max(FMath::Clamp(double(Point.Color.A), 0.0, 1.0), 1.0e-6);
+            const FKasumiCovariance3 PointCovariance = BuildPointCovariance(Point);
+            const FVector Delta = Point.Position - Mean;
+            for (int32 Row = 0; Row < 3; ++Row)
+            {
+                for (int32 Column = 0; Column < 3; ++Column)
+                {
+                    MergedCovariance.M[Row][Column] += Weight *
+                        (PointCovariance.M[Row][Column] + Delta[Row] * Delta[Column]);
+                }
+            }
+        }
+        for (int32 Row = 0; Row < 3; ++Row)
+        {
+            for (int32 Column = 0; Column < 3; ++Column)
+            {
+                MergedCovariance.M[Row][Column] /= WeightSum;
+            }
+        }
+
+        FKasumiSplatPoint& Merged = MergedPoints.AddDefaulted_GetRef();
+        Merged.StableId = BuildMergedStableId(
+            MakeArrayView(Points).Slice(GroupStart, GroupEnd - GroupStart),
+            LODStride);
+        Merged.Position = Mean;
+        DecomposeCovariance(MergedCovariance, Merged.Rotation, Merged.Sigma);
+        const FVector3d AverageColor = WeightedColor / WeightSum;
+        Merged.Color = FLinearColor(
+            float(AverageColor.X),
+            float(AverageColor.Y),
+            float(AverageColor.Z),
+            float(1.0 - Transmittance));
+
+        if (bHasMatchingSH)
+        {
+            TArray<float, TInlineAllocator<45>> MergedCoefficients;
+            MergedCoefficients.SetNumZeroed(SHCoefficientsPerPoint);
+            for (int32 PointIndex = GroupStart; PointIndex < GroupEnd; ++PointIndex)
+            {
+                const double Weight = FMath::Max(
+                    FMath::Clamp(double(Points[PointIndex].Color.A), 0.0, 1.0),
+                    1.0e-6);
+                for (int32 CoefficientIndex = 0; CoefficientIndex < SHCoefficientsPerPoint; ++CoefficientIndex)
+                {
+                    MergedCoefficients[CoefficientIndex] += float(
+                        Weight * ReadKasumiSplatPackedSH(
+                            PackedHigherOrderSH,
+                            PointIndex,
+                            CoefficientIndex,
+                            SHCoefficientsPerPoint) / WeightSum);
+                }
+            }
+            AppendPackedSHValues(MergedCoefficients, MergedSH);
+        }
+    }
+    Points = MoveTemp(MergedPoints);
+    PackedHigherOrderSH = MoveTemp(MergedSH);
+}
+
 FKasumiSplatResidentSnapshot BuildKasumiSplatTransitionSnapshot(
     const FKasumiSplatResidentSnapshot& PreviousTarget,
     const FKasumiSplatResidentSnapshot& NewTarget)
@@ -431,12 +653,13 @@ FKasumiSplatResidentSnapshot BuildKasumiSplatTransitionSnapshot(
     const bool bCanMergeSH = SHCount > 0 &&
         PreviousTarget.HigherOrderSHCoefficientsPerPoint == SHCount &&
         PreviousTarget.HigherOrderSH.IsValid() && NewTarget.HigherOrderSH.IsValid() &&
-        PreviousTarget.HigherOrderSH->Num() == PreviousPoints.Num() * SHCount &&
-        NewTarget.HigherOrderSH->Num() == NewPoints.Num() * SHCount;
-    TArray<float> MergedSH;
+        PreviousTarget.HigherOrderSH->Num() == PreviousPoints.Num() * FMath::DivideAndRoundUp(SHCount, 2) &&
+        NewTarget.HigherOrderSH->Num() == NewPoints.Num() * FMath::DivideAndRoundUp(SHCount, 2);
+    const int32 SHWordsPerPoint = FMath::DivideAndRoundUp(SHCount, 2);
+    TArray<uint32> MergedSH;
     if (bCanMergeSH)
     {
-        MergedSH.Reserve((PreviousPoints.Num() + NewPoints.Num()) * SHCount);
+        MergedSH.Reserve((PreviousPoints.Num() + NewPoints.Num()) * SHWordsPerPoint);
     }
 
     for (int32 NewIndex = 0; NewIndex < NewPoints.Num(); ++NewIndex)
@@ -453,7 +676,9 @@ FKasumiSplatResidentSnapshot BuildKasumiSplatTransitionSnapshot(
             : EKasumiSplatTransitionClass::Entering));
         if (bCanMergeSH)
         {
-            MergedSH.Append(NewTarget.HigherOrderSH->GetData() + NewIndex * SHCount, SHCount);
+            MergedSH.Append(
+                NewTarget.HigherOrderSH->GetData() + int64(NewIndex) * SHWordsPerPoint,
+                SHWordsPerPoint);
         }
     }
 
@@ -467,7 +692,9 @@ FKasumiSplatResidentSnapshot BuildKasumiSplatTransitionSnapshot(
         TransitionClasses.Add(uint8(EKasumiSplatTransitionClass::Leaving));
         if (bCanMergeSH)
         {
-            MergedSH.Append(PreviousTarget.HigherOrderSH->GetData() + PreviousIndex * SHCount, SHCount);
+            MergedSH.Append(
+                PreviousTarget.HigherOrderSH->GetData() + int64(PreviousIndex) * SHWordsPerPoint,
+                SHWordsPerPoint);
         }
     }
 
@@ -476,7 +703,7 @@ FKasumiSplatResidentSnapshot BuildKasumiSplatTransitionSnapshot(
     Result.TransitionClasses = MakeShared<const TArray<uint8>, ESPMode::ThreadSafe>(MoveTemp(TransitionClasses));
     if (bCanMergeSH)
     {
-        Result.HigherOrderSH = MakeShared<const TArray<float>, ESPMode::ThreadSafe>(MoveTemp(MergedSH));
+        Result.HigherOrderSH = MakeShared<const TArray<uint32>, ESPMode::ThreadSafe>(MoveTemp(MergedSH));
         Result.HigherOrderSHCoefficientsPerPoint = SHCount;
     }
     return Result;

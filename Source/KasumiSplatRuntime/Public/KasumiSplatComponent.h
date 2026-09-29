@@ -124,6 +124,10 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Performance", meta=(ClampMin="1", UIMin="1", EditCondition="!bFullQualityReference"))
     int32 MaxVisibleSplats = 750000;
 
+    /** Rejects Morton-local point clusters before the more expensive per-point visibility pass. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Performance")
+    bool bEnableClusterCulling = true;
+
     /** Stream only the nearest asset chunks into the CPU/GPU resident working set. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Streaming", meta=(EditCondition="!bFullQualityReference"))
     bool bEnableChunkStreaming = true;

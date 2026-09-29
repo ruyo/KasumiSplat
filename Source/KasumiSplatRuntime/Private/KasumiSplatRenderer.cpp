@@ -60,6 +60,32 @@ namespace
         -1.0f,
         TEXT("Override the component maximum projected radius. Negative values use the component setting."),
         ECVF_RenderThreadSafe);
+
+    void InitializeKasumiDrawIndirectArgs(FRDGBuilder& GraphBuilder, FRDGBufferRef Buffer)
+    {
+        GraphBuilder.QueueBufferUpload(Buffer, [](void* Data, uint32 DataSize)
+        {
+            check(DataSize >= 4u * sizeof(uint32));
+            const uint32 InitialArgs[4] = {6u, 0u, 0u, 0u};
+            FMemory::Memcpy(Data, InitialArgs, sizeof(InitialArgs));
+        });
+    }
+
+    void InitializeKasumiDispatchIndirectArgs(FRDGBuilder& GraphBuilder, FRDGBufferRef Buffer)
+    {
+        GraphBuilder.QueueBufferUpload(Buffer, [](void* Data, uint32 DataSize)
+        {
+            check(DataSize >= 3u * sizeof(uint32));
+            const uint32 InitialArgs[3] = {0u, 1u, 1u};
+            FMemory::Memcpy(Data, InitialArgs, sizeof(InitialArgs));
+            if (DataSize > sizeof(InitialArgs))
+            {
+                FMemory::Memzero(
+                    static_cast<uint8*>(Data) + sizeof(InitialArgs),
+                    DataSize - sizeof(InitialArgs));
+            }
+        });
+    }
 }
 
 BEGIN_SHADER_PARAMETER_STRUCT(FKasumiSplatDrawParameters, )
@@ -144,6 +170,164 @@ static void AddKasumiRadixSortPass(
                 FeatureLevel);
             check(ResultBufferIndex == 0);
         });
+}
+
+struct FKasumiClusterCullSettings
+{
+    bool bEnabled = false;
+    float RadiusScale = 1.0f;
+    float RadiusInflation = 0.0f;
+};
+
+static FKasumiClusterCullSettings ResolveKasumiClusterCullSettings(const FKasumiSplatPacket& Packet)
+{
+    FKasumiClusterCullSettings Result;
+    Result.bEnabled = Packet.bEnableClusterCulling;
+    const float Progress = FMath::Clamp(Packet.Style.Progress, 0.0f, 1.0f);
+    if (FMath::Abs(Packet.Style.RotationDegrees) * Progress > KINDA_SMALL_NUMBER)
+    {
+        Result.bEnabled = false;
+    }
+
+    Result.RadiusScale = FMath::Max(
+        1.0f,
+        FMath::Clamp(Packet.Style.Scale, 0.0f, 10.0f) *
+            FMath::Max(1.0f, FMath::Clamp(Packet.Style.TargetScale, 0.0f, 10.0f)));
+    Result.RadiusInflation = FMath::Clamp(Packet.Style.Displacement, 0.0f, 1000.0f) * Progress;
+    for (const FKasumiSplatEffectLayer& Layer : Packet.EffectLayers)
+    {
+        if (!Layer.bEnabled) continue;
+        const float MaximumWeight = FMath::Clamp(Layer.Weight, 0.0f, 1.0f) * Progress;
+        if (Layer.Type == EKasumiSplatEffectType::Displace)
+        {
+            Result.RadiusInflation += FMath::Abs(Layer.Scalar) * MaximumWeight;
+        }
+        else if (Layer.Type == EKasumiSplatEffectType::Scale)
+        {
+            Result.RadiusScale *= FMath::Max(1.0f, FMath::Abs(Layer.Scalar));
+        }
+        else if (Layer.Type == EKasumiSplatEffectType::Rotate &&
+            FMath::Abs(Layer.Scalar) * MaximumWeight > KINDA_SMALL_NUMBER)
+        {
+            Result.bEnabled = false;
+        }
+    }
+    return Result;
+}
+
+struct FKasumiClusterCullResult
+{
+    FRDGBufferRef Visibility = nullptr;
+    FRDGBufferRef VisibleWorkgroups = nullptr;
+    FRDGBufferRef DispatchArgs = nullptr;
+    FRDGBufferRef Fallback = nullptr;
+    bool bEnabled = false;
+    bool bUseIndirectDispatch = false;
+};
+
+static FKasumiClusterCullResult AddKasumiClusterCullPass(
+    FRDGBuilder& GraphBuilder,
+    const FKasumiSplatGPUData& GPUData,
+    const FMatrix44f& LocalToWorld,
+    const FMatrix44f& WorldToClip,
+    const FVector2f& ViewSize,
+    float MinProjectedRadiusPixels,
+    const FKasumiClusterCullSettings& Settings,
+    ERHIFeatureLevel::Type FeatureLevel,
+    bool bAllowIndirectDispatch,
+    uint32 SourcePointCount)
+{
+    FKasumiClusterCullResult Result;
+    Result.Visibility = GraphBuilder.CreateBuffer(
+        FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), FMath::Max(GPUData.ClusterCount, 1u)),
+        TEXT("KasumiSplat.ClusterVisibility"));
+    const uint32 SourceWorkgroupCount = FMath::Max(
+        FMath::DivideAndRoundUp(SourcePointCount, KasumiCullGroupSize),
+        1u);
+    Result.VisibleWorkgroups = GraphBuilder.CreateBuffer(
+        FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), SourceWorkgroupCount),
+        TEXT("KasumiSplat.VisibleClusterWorkgroups"));
+    Result.DispatchArgs = GraphBuilder.CreateBuffer(
+        FRDGBufferDesc::CreateIndirectDesc(3),
+        TEXT("KasumiSplat.ClusterDispatchArgs"));
+    Result.Fallback = GraphBuilder.CreateBuffer(
+        FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), 1),
+        TEXT("KasumiSplat.ClusterCullFallback"));
+    Result.bEnabled = Settings.bEnabled && GPUData.ClusterCount > 0 && GPUData.ClusterBoundsBuffer != nullptr;
+    Result.bUseIndirectDispatch = Result.bEnabled && bAllowIndirectDispatch;
+    if (!Result.bEnabled)
+    {
+        AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(Result.Visibility, PF_R32_UINT), 1u);
+        AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(Result.VisibleWorkgroups, PF_R32_UINT), 0u);
+        InitializeKasumiDispatchIndirectArgs(GraphBuilder, Result.DispatchArgs);
+        AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(Result.Fallback, PF_R32_UINT), 0u);
+        return Result;
+    }
+
+    if (Result.bUseIndirectDispatch)
+    {
+        FKasumiSplatInitializeClusterDispatchCS::FParameters* InitializeParameters =
+            GraphBuilder.AllocParameters<FKasumiSplatInitializeClusterDispatchCS::FParameters>();
+        InitializeParameters->SourceWorkgroupCount = SourceWorkgroupCount;
+        InitializeParameters->RWVisibleClusterWorkgroups = GraphBuilder.CreateUAV(
+            Result.VisibleWorkgroups,
+            PF_R32_UINT);
+        InitializeParameters->RWClusterDispatchArgs = GraphBuilder.CreateUAV(Result.DispatchArgs, PF_R32_UINT);
+        InitializeParameters->RWClusterCullFallback = GraphBuilder.CreateUAV(Result.Fallback, PF_R32_UINT);
+        TShaderMapRef<FKasumiSplatInitializeClusterDispatchCS> InitializeShader(
+            GetGlobalShaderMap(FeatureLevel));
+        FComputeShaderUtils::AddPass(
+            GraphBuilder,
+            RDG_EVENT_NAME("KasumiSplat.InitializeClusterDispatch(%u)", SourceWorkgroupCount),
+            InitializeShader,
+            InitializeParameters,
+            FComputeShaderUtils::GetGroupCount(SourceWorkgroupCount, KasumiCullGroupSize));
+    }
+    else
+    {
+        InitializeKasumiDispatchIndirectArgs(GraphBuilder, Result.DispatchArgs);
+        AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(Result.Fallback, PF_R32_UINT), 0u);
+    }
+
+    FKasumiSplatClusterCullCS::FParameters* Parameters =
+        GraphBuilder.AllocParameters<FKasumiSplatClusterCullCS::FParameters>();
+    Parameters->ClusterBounds = GraphBuilder.CreateSRV(GPUData.ClusterBoundsBuffer);
+    Parameters->LocalToWorld = LocalToWorld;
+    Parameters->WorldToClip = WorldToClip;
+    Parameters->ViewSize = ViewSize;
+    Parameters->RadiusScale = Settings.RadiusScale;
+    Parameters->RadiusInflation = Settings.RadiusInflation;
+    Parameters->MinProjectedRadiusPixels = FMath::Max(MinProjectedRadiusPixels, 0.0f);
+    Parameters->ClusterCount = GPUData.ClusterCount;
+    Parameters->ClusterPointCount = KasumiSplatConfig::ClusterPointCount;
+    Parameters->SourcePointCount = SourcePointCount;
+    Parameters->BuildIndirectWorkgroups = Result.bUseIndirectDispatch ? 1u : 0u;
+    Parameters->RWClusterVisibility = GraphBuilder.CreateUAV(Result.Visibility, PF_R32_UINT);
+    Parameters->RWVisibleClusterWorkgroups = GraphBuilder.CreateUAV(Result.VisibleWorkgroups, PF_R32_UINT);
+    Parameters->RWClusterDispatchArgs = GraphBuilder.CreateUAV(Result.DispatchArgs, PF_R32_UINT);
+    TShaderMapRef<FKasumiSplatClusterCullCS> Shader(GetGlobalShaderMap(FeatureLevel));
+    FComputeShaderUtils::AddPass(
+        GraphBuilder,
+        RDG_EVENT_NAME("KasumiSplat.ClusterCull(%u)", GPUData.ClusterCount),
+        Shader,
+        Parameters,
+        FComputeShaderUtils::GetGroupCount(GPUData.ClusterCount, KasumiCullGroupSize));
+    if (Result.bUseIndirectDispatch)
+    {
+        FKasumiSplatFinalizeClusterDispatchCS::FParameters* FinalizeParameters =
+            GraphBuilder.AllocParameters<FKasumiSplatFinalizeClusterDispatchCS::FParameters>();
+        FinalizeParameters->SourceWorkgroupCount = SourceWorkgroupCount;
+        FinalizeParameters->RWClusterDispatchArgs = GraphBuilder.CreateUAV(Result.DispatchArgs, PF_R32_UINT);
+        FinalizeParameters->RWClusterCullFallback = GraphBuilder.CreateUAV(Result.Fallback, PF_R32_UINT);
+        TShaderMapRef<FKasumiSplatFinalizeClusterDispatchCS> FinalizeShader(GetGlobalShaderMap(FeatureLevel));
+        FComputeShaderUtils::AddPass(
+            GraphBuilder,
+            RDG_EVENT_NAME("KasumiSplat.FinalizeClusterDispatch"),
+            FinalizeShader,
+            FinalizeParameters,
+            FIntVector(1, 1, 1));
+    }
+    return Result;
 }
 
 static void AddKasumiDrawPass(
@@ -371,9 +555,9 @@ static bool RenderKasumiSceneGroup(
     AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ExactKeys1, PF_R32_UINT), 0xffffffffu);
     AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ExactValues0, PF_R32_UINT), 0xffffffffu);
     AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ExactValues1, PF_R32_UINT), 0xffffffffu);
-    AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(DrawIndirectArgs, PF_R32_UINT), 0u);
+    InitializeKasumiDrawIndirectArgs(GraphBuilder, DrawIndirectArgs);
     AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(DummyUint, PF_R32_UINT), 0u);
-    AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(DummyIndirectArgs, PF_R32_UINT), 0u);
+    InitializeKasumiDrawIndirectArgs(GraphBuilder, DummyIndirectArgs);
 
     const FVector2f ViewSize(Output.ViewRect.Width(), Output.ViewRect.Height());
     const FMatrix44f WorldToClip(View.ViewMatrices.GetWorldToClip());
@@ -450,9 +634,25 @@ static bool RenderKasumiSceneGroup(
             ? GraphBuilder.RegisterExternalTexture(CreateRenderTarget(Entry.Packet.EffectMaskVolume, TEXT("KasumiSplat.GroupExternalMask3D")))
             : SystemTextures.VolumetricBlack;
 
+        const FKasumiClusterCullSettings ClusterSettings = ResolveKasumiClusterCullSettings(Entry.Packet);
+        const FKasumiClusterCullResult ClusterCull = AddKasumiClusterCullPass(
+            GraphBuilder,
+            GPUData,
+            LocalToWorld,
+            WorldToClip,
+            ViewSize,
+            bFullQuality ? 0.0f : Entry.Packet.MinProjectedRadiusPixels,
+            ClusterSettings,
+            View.GetFeatureLevel(),
+            Item.PointCount == Item.SourcePointCount,
+            Item.SourcePointCount);
+
         FKasumiSplatCullCS::FParameters* Parameters = GraphBuilder.AllocParameters<FKasumiSplatCullCS::FParameters>();
         Parameters->PointData = GraphBuilder.CreateSRV(GPUData.PointBuffer);
         Parameters->SHData = GraphBuilder.CreateSRV(GPUData.SHBuffer);
+        Parameters->ClusterVisibility = GraphBuilder.CreateSRV(ClusterCull.Visibility, PF_R32_UINT);
+        Parameters->VisibleClusterWorkgroups = GraphBuilder.CreateSRV(ClusterCull.VisibleWorkgroups, PF_R32_UINT);
+        Parameters->ClusterCullFallback = GraphBuilder.CreateSRV(ClusterCull.Fallback, PF_R32_UINT);
         Parameters->View = View.ViewUniformBuffer;
         Parameters->LocalToWorld = LocalToWorld;
         Parameters->WorldToClip = WorldToClip;
@@ -509,6 +709,10 @@ static bool RenderKasumiSceneGroup(
         Parameters->Seed = uint32(Entry.Packet.Style.Seed);
         Parameters->PointCount = Item.PointCount;
         Parameters->SourcePointCount = Item.SourcePointCount;
+        Parameters->ClusterPointCount = KasumiSplatConfig::ClusterPointCount;
+        Parameters->ClusterCount = GPUData.ClusterCount;
+        Parameters->UseClusterCulling = ClusterCull.bEnabled ? 1u : 0u;
+        Parameters->UseCompactedClusterDispatch = ClusterCull.bUseIndirectDispatch ? 1u : 0u;
         Parameters->UseLogDepthSort = View.IsPerspectiveProjection() ? 1u : 0u;
         Parameters->SortPath = 1u;
         Parameters->EnableTiledFallback = 0u;
@@ -526,12 +730,25 @@ static bool RenderKasumiSceneGroup(
         Parameters->RWTileKeys = GraphBuilder.CreateUAV(DummyUint, PF_R32_UINT);
         Parameters->RWTileValues = GraphBuilder.CreateUAV(DummyUint, PF_R32_UINT);
         Parameters->RWGroupRecordData = GraphBuilder.CreateUAV(GroupRecordData);
-        FComputeShaderUtils::AddPass(
-            GraphBuilder,
-            RDG_EVENT_NAME("KasumiSplat.SceneGroupCull(%d:%u)", GroupId, Item.PointCount),
-            CullShader,
-            Parameters,
-            FComputeShaderUtils::GetGroupCount(Item.PointCount, KasumiCullGroupSize));
+        if (ClusterCull.bUseIndirectDispatch)
+        {
+            FComputeShaderUtils::AddPass(
+                GraphBuilder,
+                RDG_EVENT_NAME("KasumiSplat.SceneGroupCullIndirect(%d:%u)", GroupId, Item.PointCount),
+                CullShader,
+                Parameters,
+                ClusterCull.DispatchArgs,
+                0);
+        }
+        else
+        {
+            FComputeShaderUtils::AddPass(
+                GraphBuilder,
+                RDG_EVENT_NAME("KasumiSplat.SceneGroupCull(%d:%u)", GroupId, Item.PointCount),
+                CullShader,
+                Parameters,
+                FComputeShaderUtils::GetGroupCount(Item.PointCount, KasumiCullGroupSize));
+        }
     }
 
     AddKasumiRadixSortPass(
@@ -960,8 +1177,8 @@ public:
                 AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(BucketCounts, PF_R32_UINT), 0u);
                 AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(SortedIndices, PF_R32_UINT), 0u);
             }
-            AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(DrawIndirectArgs, PF_R32_UINT), 0u);
-            AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(TileDrawIndirectArgs, PF_R32_UINT), 0u);
+            InitializeKasumiDrawIndirectArgs(GraphBuilder, DrawIndirectArgs);
+            InitializeKasumiDrawIndirectArgs(GraphBuilder, TileDrawIndirectArgs);
             AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(TileOverflow, PF_R32_UINT), 0u);
             AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(TileKeys0, PF_R32_UINT), 0xffffffffu);
             AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(TileKeys1, PF_R32_UINT), 0xffffffffu);
@@ -1036,9 +1253,42 @@ public:
                 : SystemTextures.VolumetricBlack;
             FSamplerStateRHIRef MaskSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 
+            const FKasumiClusterCullSettings ClusterSettings = ResolveKasumiClusterCullSettings(Entry->Packet);
+            const FKasumiClusterCullResult ClusterCull = AddKasumiClusterCullPass(
+                GraphBuilder,
+                GPUData,
+                LocalToWorld,
+                WorldToClip,
+                ViewSize,
+                bFullQuality ? 0.0f : Entry->Packet.MinProjectedRadiusPixels,
+                ClusterSettings,
+                View.GetFeatureLevel(),
+                PointCount == SourcePointCount,
+                SourcePointCount);
+            if (ClusterCull.bUseIndirectDispatch)
+            {
+                if (bBucketPath)
+                {
+                    AddClearUAVPass(
+                        GraphBuilder,
+                        GraphBuilder.CreateUAV(VisibilityBuckets, PF_R32_UINT),
+                        0xffffffffu);
+                }
+                if (bGlobalPath || bSameFrameTiledFallback)
+                {
+                    AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ExactKeys0, PF_R32_UINT), 0xffffffffu);
+                    AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ExactValues0, PF_R32_UINT), 0xffffffffu);
+                }
+            }
+
             FKasumiSplatCullCS::FParameters* CullParameters = GraphBuilder.AllocParameters<FKasumiSplatCullCS::FParameters>();
             CullParameters->PointData = GraphBuilder.CreateSRV(PointBuffer);
             CullParameters->SHData = GraphBuilder.CreateSRV(SHBuffer);
+            CullParameters->ClusterVisibility = GraphBuilder.CreateSRV(ClusterCull.Visibility, PF_R32_UINT);
+            CullParameters->VisibleClusterWorkgroups = GraphBuilder.CreateSRV(
+                ClusterCull.VisibleWorkgroups,
+                PF_R32_UINT);
+            CullParameters->ClusterCullFallback = GraphBuilder.CreateSRV(ClusterCull.Fallback, PF_R32_UINT);
             CullParameters->View = View.ViewUniformBuffer;
             CullParameters->LocalToWorld = LocalToWorld;
             CullParameters->WorldToClip = WorldToClip;
@@ -1078,6 +1328,10 @@ public:
             CullParameters->Seed = uint32(Entry->Packet.Style.Seed);
             CullParameters->PointCount = PointCount;
             CullParameters->SourcePointCount = SourcePointCount;
+            CullParameters->ClusterPointCount = KasumiSplatConfig::ClusterPointCount;
+            CullParameters->ClusterCount = GPUData.ClusterCount;
+            CullParameters->UseClusterCulling = ClusterCull.bEnabled ? 1u : 0u;
+            CullParameters->UseCompactedClusterDispatch = ClusterCull.bUseIndirectDispatch ? 1u : 0u;
             CullParameters->UseLogDepthSort = View.IsPerspectiveProjection() ? 1u : 0u;
             CullParameters->SortPath = bBucketPath ? 0u : (bGlobalPath ? 1u : 2u);
             CullParameters->EnableTiledFallback = bSameFrameTiledFallback ? 1u : 0u;
@@ -1116,12 +1370,25 @@ public:
             CullParameters->RWTileKeys = GraphBuilder.CreateUAV(TileKeys0, PF_R32_UINT);
             CullParameters->RWTileValues = GraphBuilder.CreateUAV(TileValues0, PF_R32_UINT);
             CullParameters->RWGroupRecordData = GraphBuilder.CreateUAV(GroupRecordData);
-            FComputeShaderUtils::AddPass(
-                GraphBuilder,
-                RDG_EVENT_NAME("KasumiSplat.Cull(%u)", PointCount),
-                CullShader,
-                CullParameters,
-                FComputeShaderUtils::GetGroupCount(PointCount, KasumiCullGroupSize));
+            if (ClusterCull.bUseIndirectDispatch)
+            {
+                FComputeShaderUtils::AddPass(
+                    GraphBuilder,
+                    RDG_EVENT_NAME("KasumiSplat.CullIndirect(%u)", PointCount),
+                    CullShader,
+                    CullParameters,
+                    ClusterCull.DispatchArgs,
+                    0);
+            }
+            else
+            {
+                FComputeShaderUtils::AddPass(
+                    GraphBuilder,
+                    RDG_EVENT_NAME("KasumiSplat.Cull(%u)", PointCount),
+                    CullShader,
+                    CullParameters,
+                    FComputeShaderUtils::GetGroupCount(PointCount, KasumiCullGroupSize));
+            }
 
             if (ResolvedSortMode == EKasumiSplatSortMode::Bucket)
             {
@@ -1426,6 +1693,7 @@ namespace KasumiSplat
                 {
                     Entry->PointBuffer.SafeRelease();
                     Entry->SHBuffer.SafeRelease();
+                    Entry->ClusterBoundsBuffer.SafeRelease();
                     Entry->bTiledOverflowReadbackRelevant = false;
                     Entry->bTiledOverflowRecoveryProbePending = false;
                     Entry->bDelayedTiledFallbackActive = false;
