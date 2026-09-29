@@ -15,6 +15,8 @@ struct FKasumiSplatPacket
     TSharedPtr<const TArray<FKasumiSplatPoint>, ESPMode::ThreadSafe> Points;
     TSharedPtr<const TArray<uint32>, ESPMode::ThreadSafe> HigherOrderSH;
     TSharedPtr<const TArray<uint8>, ESPMode::ThreadSafe> TransitionClasses;
+    /** Opaque content identity used only to share immutable render-thread buffers. Zero disables sharing. */
+    uint64 GPUResourceKey = 0;
     uint32 HigherOrderSHCoefficientsPerPoint = 0;
     float TemporalTransitionAlpha = 1.0f;
     EKasumiSplatVelocityMode VelocityMode = EKasumiSplatVelocityMode::ActorAndCamera;

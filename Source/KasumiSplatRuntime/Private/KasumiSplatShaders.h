@@ -80,7 +80,7 @@ public:
     SHADER_USE_PARAMETER_STRUCT(FKasumiSplatCullCS, FGlobalShader);
 
     BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, PointData)
+        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, PointData)
         SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, SHData)
         SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, ClusterVisibility)
         SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, VisibleClusterWorkgroups)
@@ -275,7 +275,7 @@ public:
     SHADER_USE_PARAMETER_STRUCT(FKasumiSplatInstanceVS, FGlobalShader);
 
     BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, PointData)
+        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, PointData)
         SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, SHData)
         SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, VisibleIndices)
         SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, TileKeys)

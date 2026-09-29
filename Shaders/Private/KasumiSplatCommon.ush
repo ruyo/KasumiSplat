@@ -6,7 +6,7 @@
 // Reject only conservatively negligible center-alpha contributions.
 #define KASUMI_MIN_EFFECTIVE_ALPHA 0.0001
 
-StructuredBuffer<float4> PointData;
+StructuredBuffer<uint> PointData;
 StructuredBuffer<uint> SHData;
 StructuredBuffer<float4> ClusterBounds;
 StructuredBuffer<float4> GroupRecordData;
@@ -135,7 +135,8 @@ float3 StableDirection(uint StableId)
 
 float TransitionOpacity(uint PointIndex)
 {
-    const float TransitionClass = PointData[PointIndex * 4u + 3u].w;
+    const uint PackedColorTransition = PointData[PointIndex * 9u + 8u];
+    const float TransitionClass = float(PackedColorTransition >> 30u);
     if (TransitionClass < 0.5) return 1.0;
     if (TransitionClass < 1.5) return saturate(TemporalTransitionAlpha);
     return 1.0 - saturate(TemporalTransitionAlpha);
@@ -156,9 +157,27 @@ float ExternalMaskWeight(float3 LocalPosition)
 
 float LoadSHValue(uint PointIndex, uint FlatCoefficientIndex)
 {
-    const uint PackedValue = SHData[PointIndex * SHWordsPerPoint + FlatCoefficientIndex / 2u];
-    const uint EncodedHalf = (PackedValue >> ((FlatCoefficientIndex & 1u) * 16u)) & 0xffffu;
-    return f16tof32(EncodedHalf);
+    const uint PointBase = PointIndex * SHWordsPerPoint;
+    const float Scale = f16tof32(SHData[PointBase] & 0xffffu);
+    const uint PackedValue = SHData[PointBase + 1u + FlatCoefficientIndex / 4u];
+    const uint EncodedByte = (PackedValue >> ((FlatCoefficientIndex & 3u) * 8u)) & 0xffu;
+    const int SignedValue = (EncodedByte & 0x80u) != 0u ? int(EncodedByte) - 256 : int(EncodedByte);
+    return float(SignedValue) * Scale;
+}
+
+float4 LoadSourceColor(uint PointIndex)
+{
+    const uint Packed = PointData[PointIndex * 9u + 8u];
+    return float4(
+        float(Packed & 0x3ffu),
+        float((Packed >> 10u) & 0x3ffu),
+        float((Packed >> 20u) & 0x3ffu),
+        1023.0) / 1023.0;
+}
+
+float2 UnpackHalf2(uint Packed)
+{
+    return float2(f16tof32(Packed & 0xffffu), f16tof32(Packed >> 16u));
 }
 
 float ApplyOpacityDensity(float Alpha)
@@ -317,12 +336,20 @@ void LoadTransformedPoint(
     out float4 LayerColor,
     out float3 TransformedLocalPosition)
 {
-    const float4 PositionAndId = PointData[PointIndex * 4u + 0u];
-    Rotation = normalize(PointData[PointIndex * 4u + 1u]);
-    SigmaAndAlpha = PointData[PointIndex * 4u + 2u];
-    StableId = asuint(PositionAndId.w);
+    const uint PointBase = PointIndex * 9u;
+    const float3 Position = float3(
+        asfloat(PointData[PointBase + 0u]),
+        asfloat(PointData[PointBase + 1u]),
+        asfloat(PointData[PointBase + 2u]));
+    StableId = PointData[PointBase + 3u];
+    const float2 RotationXY = UnpackHalf2(PointData[PointBase + 4u]);
+    const float2 RotationZW = UnpackHalf2(PointData[PointBase + 5u]);
+    Rotation = normalize(float4(RotationXY, RotationZW));
+    const float2 SigmaXY = UnpackHalf2(PointData[PointBase + 6u]);
+    const float2 SigmaZAlpha = UnpackHalf2(PointData[PointBase + 7u]);
+    SigmaAndAlpha = float4(SigmaXY, SigmaZAlpha);
 
-    float3 LocalPosition = PositionAndId.xyz;
+    float3 LocalPosition = Position;
     Weight = EffectWeight(LocalPosition, StableId);
     const float Angle = radians(EffectValues.z) * Weight;
     const float2 Relative = LocalPosition.xy - MaskCenterRadius.xy;

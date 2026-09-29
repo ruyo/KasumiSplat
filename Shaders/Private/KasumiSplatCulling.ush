@@ -294,7 +294,7 @@ void CullCS(
     }
     if (WriteGroupRecords != 0u && bVisible)
     {
-        float4 SourceColor = PointData[PointIndex * 4u + 3u];
+        float4 SourceColor = LoadSourceColor(PointIndex);
         SourceColor.rgb = ApplyAppearanceColor(EvaluateHigherOrderSH(
             PointIndex,
             SourceColor.rgb,

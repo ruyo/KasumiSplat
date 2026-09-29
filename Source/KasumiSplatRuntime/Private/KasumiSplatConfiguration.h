@@ -8,6 +8,8 @@ namespace KasumiSplatConfig
     inline constexpr uint32 DepthBucketCount = 4096;
     inline constexpr uint32 CullGroupSize = 64;
     inline constexpr uint32 ClusterPointCount = 256;
+    inline constexpr uint32 GPUPointWordCount = 9;
+    inline constexpr uint32 GPUPointStride = GPUPointWordCount * sizeof(uint32);
     inline constexpr uint32 TileCapacity = 256;
     inline constexpr uint32 AutoTiledThreshold = 750000;
     inline constexpr uint32 MinTileSizePixels = 16;
@@ -25,4 +27,9 @@ namespace KasumiSplatConfig
     FQualityValues GetQualityValues(EKasumiSplatQuality Preset);
     FKasumiSplatAppearance GetAppearanceValues(EKasumiSplatAppearancePreset Preset);
     void SanitizeRenderPacket(FKasumiSplatPacket& Packet);
+
+    inline uint32 GetGPUHigherOrderSHWordsPerPoint(uint32 CoefficientCount)
+    {
+        return CoefficientCount > 0 ? 1u + FMath::DivideAndRoundUp(CoefficientCount, 4u) : 0u;
+    }
 }

@@ -34,7 +34,7 @@ FKasumiVertexOutput MainVS(uint VertexId : SV_VertexID, uint InstanceId : SV_Ins
     FKasumiVertexOutput Output;
     const uint PointIndex = VisibleIndices[InstanceId];
     Output.TileIndex = UseTilePairs != 0u ? TileKeys[InstanceId] >> TileDepthBits : 0xffffffffu;
-    float4 SourceColor = PointData[PointIndex * 4u + 3u];
+    float4 SourceColor = LoadSourceColor(PointIndex);
     float4 CenterClip;
     float4 Rotation;
     float4 SigmaAndAlpha;

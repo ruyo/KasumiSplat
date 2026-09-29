@@ -4,6 +4,14 @@
 #include "RenderGraphResources.h"
 #include "RHIGPUReadback.h"
 
+struct FKasumiSplatSharedGPUResources
+{
+    TRefCountPtr<FRDGPooledBuffer> PointBuffer;
+    TRefCountPtr<FRDGPooledBuffer> SHBuffer;
+    TRefCountPtr<FRDGPooledBuffer> ClusterBoundsBuffer;
+    uint32 SHWordsPerPoint = 0;
+};
+
 struct FKasumiSplatRenderEntry
 {
     uint32 ComponentId = 0;
@@ -20,9 +28,8 @@ struct FKasumiSplatRenderEntry
     bool bDelayedTiledFallbackActive = false;
     uint32 DelayedTiledFallbackFramesRemaining = 0;
     uint64 LastDelayedTiledFallbackFrame = MAX_uint64;
-    TRefCountPtr<FRDGPooledBuffer> PointBuffer;
-    TRefCountPtr<FRDGPooledBuffer> SHBuffer;
-    TRefCountPtr<FRDGPooledBuffer> ClusterBoundsBuffer;
+    TSharedPtr<FKasumiSplatSharedGPUResources, ESPMode::ThreadSafe> GPUResources;
+    uint64 GPUResourceKey = 0;
 };
 
 struct FKasumiSplatGPUData
@@ -31,6 +38,7 @@ struct FKasumiSplatGPUData
     FRDGBufferRef SHBuffer = nullptr;
     FRDGBufferRef ClusterBoundsBuffer = nullptr;
     uint32 ClusterCount = 0;
+    uint32 SHWordsPerPoint = 0;
 };
 
 FKasumiSplatGPUData GetOrCreateSplatGPUData(

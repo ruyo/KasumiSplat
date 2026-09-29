@@ -436,9 +436,12 @@ bool FKasumiSplatSHDegreeReductionTest::RunTest(const FString& Parameters)
         1.0f));
 
     const int64 BaseBytes = EstimateKasumiSplatResidentBytesPerPoint(0);
-    TestEqual(TEXT("CPU and GPU share the packed FP16 word layout"),
+    TestEqual(TEXT("GPU SH uses per-point scaled INT8 coefficients"),
         EstimateKasumiSplatResidentBytesPerPoint(45) - BaseBytes,
-        int64(2 * 23 * sizeof(uint32)));
+        int64((23 + KasumiSplatConfig::GetGPUHigherOrderSHWordsPerPoint(45)) * sizeof(uint32)));
+    TestEqual(TEXT("GPU point records use the compact layout"),
+        KasumiSplatConfig::GPUPointStride,
+        uint32(36));
     TestTrue(TEXT("Degree 1 uses less estimated memory than Degree 2"),
         EstimateKasumiSplatResidentBytesPerPoint(9) < EstimateKasumiSplatResidentBytesPerPoint(24));
     TestTrue(TEXT("Degree 2 uses less estimated memory than Degree 3"),

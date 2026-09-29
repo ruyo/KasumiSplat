@@ -1,6 +1,7 @@
 #include "KasumiSplatStreaming.h"
 
 #include "KasumiSplatAsset.h"
+#include "KasumiSplatConfiguration.h"
 #include "Math/Float16.h"
 
 namespace
@@ -267,8 +268,10 @@ FKasumiSplatStreamingSelection BuildKasumiSplatStreamingSelection(
 int64 EstimateKasumiSplatResidentBytesPerPoint(int32 HigherOrderSHCoefficientsPerPoint)
 {
     const int64 SHCount = FMath::Max(0, HigherOrderSHCoefficientsPerPoint);
-    const int64 PackedSHBytes = FMath::DivideAndRoundUp(SHCount, int64(2)) * sizeof(uint32);
-    return sizeof(FKasumiSplatPoint) + 4 * sizeof(FVector4f) + 2 * PackedSHBytes;
+    const int64 CpuPackedSHBytes = FMath::DivideAndRoundUp(SHCount, int64(2)) * sizeof(uint32);
+    const int64 GpuQuantizedSHBytes = KasumiSplatConfig::GetGPUHigherOrderSHWordsPerPoint(SHCount) * sizeof(uint32);
+    return sizeof(FKasumiSplatPoint) + KasumiSplatConfig::GPUPointStride +
+        CpuPackedSHBytes + GpuQuantizedSHBytes;
 }
 
 int32 ResolveKasumiSplatSHCoefficientsPerPoint(

@@ -264,11 +264,10 @@ int64 UKasumiSplatComponent::GetApproximateResidentBytes() const
     const int64 RenderPointCount = StreamingState->RenderSnapshot.Points.IsValid()
         ? StreamingState->RenderSnapshot.Points->Num()
         : 0;
-    const int64 RenderSHWordCount = StreamingState->RenderSnapshot.HigherOrderSH.IsValid()
-        ? StreamingState->RenderSnapshot.HigherOrderSH->Num()
-        : 0;
-    const int64 GpuBytes = RenderPointCount * 4 * sizeof(FVector4f) +
-        RenderSHWordCount * sizeof(uint32);
+    const int64 GpuSHWordCount = RenderPointCount * KasumiSplatConfig::GetGPUHigherOrderSHWordsPerPoint(
+        StreamingState->RenderSnapshot.HigherOrderSHCoefficientsPerPoint);
+    const int64 GpuBytes = RenderPointCount * KasumiSplatConfig::GPUPointStride +
+        GpuSHWordCount * sizeof(uint32);
     return CpuBytes + GpuBytes;
 }
 
@@ -625,6 +624,17 @@ void UKasumiSplatComponent::Publish()
     Packet.Points = StreamingState->RenderSnapshot.Points;
     Packet.HigherOrderSH = StreamingState->RenderSnapshot.HigherOrderSH;
     Packet.TransitionClasses = StreamingState->RenderSnapshot.TransitionClasses;
+    if (Asset && !Packet.TransitionClasses.IsValid())
+    {
+        uint64 ResourceKey = uint64(reinterpret_cast<UPTRINT>(Asset.Get()));
+        ResourceKey ^= uint64(uint32(Asset->Revision)) * 0x9e3779b185ebca87ull;
+        ResourceKey ^= uint64(StreamingState->SelectionHash) << 32u;
+        ResourceKey ^= uint64(uint32(StreamingState->LastLODStride)) * 0xc2b2ae3d27d4eb4full;
+        ResourceKey ^= uint64(uint32(StreamingState->RenderSnapshot.HigherOrderSHCoefficientsPerPoint)) *
+            0x165667b19e3779f9ull;
+        ResourceKey ^= uint64(Packet.Points.IsValid() ? Packet.Points->Num() : 0) * 0x85ebca77c2b2ae63ull;
+        Packet.GPUResourceKey = ResourceKey != 0 ? ResourceKey : 1u;
+    }
     Packet.HigherOrderSHCoefficientsPerPoint = uint32(StreamingState->RenderSnapshot.HigherOrderSHCoefficientsPerPoint);
     Packet.TemporalTransitionAlpha = StreamingState->TemporalTransitionAlpha;
     Packet.VelocityMode = VelocityMode;

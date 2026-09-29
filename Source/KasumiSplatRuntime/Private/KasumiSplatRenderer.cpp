@@ -700,7 +700,7 @@ static bool RenderKasumiSceneGroup(
         Parameters->ViewLocalPosition = FVector3f(
             Entry.Packet.LocalToWorld.InverseTransformPosition(View.ViewMatrices.GetViewOrigin()));
         Parameters->HigherOrderSHCoefficientsPerPoint = Entry.Packet.HigherOrderSHCoefficientsPerPoint;
-        Parameters->SHWordsPerPoint = FMath::DivideAndRoundUp(Entry.Packet.HigherOrderSHCoefficientsPerPoint, 2u);
+        Parameters->SHWordsPerPoint = GPUData.SHWordsPerPoint;
         Parameters->ResetVelocityHistory = bResetVelocity ? 1u : 0u;
         Parameters->WriteGroupRecords = 1u;
         Parameters->GroupOutputBase = Item.OutputBase;
@@ -1353,9 +1353,7 @@ public:
             CullParameters->ViewLocalPosition = FVector3f(
                 Entry->Packet.LocalToWorld.InverseTransformPosition(View.ViewMatrices.GetViewOrigin()));
             CullParameters->HigherOrderSHCoefficientsPerPoint = Entry->Packet.HigherOrderSHCoefficientsPerPoint;
-            CullParameters->SHWordsPerPoint = FMath::DivideAndRoundUp(
-                Entry->Packet.HigherOrderSHCoefficientsPerPoint,
-                2u);
+            CullParameters->SHWordsPerPoint = GPUData.SHWordsPerPoint;
             CullParameters->ResetVelocityHistory = bResetVelocity ? 1u : 0u;
             CullParameters->WriteGroupRecords = 0u;
             CullParameters->GroupOutputBase = 0u;
@@ -1533,9 +1531,7 @@ public:
             Parameters->VS.TileDepthBits = TileDepthBits;
             Parameters->VS.Seed = uint32(Entry->Packet.Style.Seed);
             Parameters->VS.HigherOrderSHCoefficientsPerPoint = Entry->Packet.HigherOrderSHCoefficientsPerPoint;
-            Parameters->VS.SHWordsPerPoint = FMath::DivideAndRoundUp(
-                Entry->Packet.HigherOrderSHCoefficientsPerPoint,
-                2u);
+            Parameters->VS.SHWordsPerPoint = GPUData.SHWordsPerPoint;
             Parameters->VS.LayerCount = LayerCount;
             FMemory::Memcpy(Parameters->VS.LayerTypeWeight.GetData(), LayerTypeWeight, sizeof(LayerTypeWeight));
             FMemory::Memcpy(Parameters->VS.LayerMaskCenterFeather.GetData(), LayerMaskCenterFeather, sizeof(LayerMaskCenterFeather));
@@ -1689,19 +1685,16 @@ namespace KasumiSplat
                 const bool bSHChanged =
                     Entry->Packet.HigherOrderSH.Get() != Packet.HigherOrderSH.Get() ||
                     Entry->Packet.HigherOrderSHCoefficientsPerPoint != Packet.HigherOrderSHCoefficientsPerPoint;
-                if (bPointsChanged)
+                const bool bSharedContentUnchanged = Packet.GPUResourceKey != 0 &&
+                    Entry->Packet.GPUResourceKey == Packet.GPUResourceKey;
+                if ((bPointsChanged || bSHChanged) && !bSharedContentUnchanged)
                 {
-                    Entry->PointBuffer.SafeRelease();
-                    Entry->SHBuffer.SafeRelease();
-                    Entry->ClusterBoundsBuffer.SafeRelease();
+                    Entry->GPUResources.Reset();
+                    Entry->GPUResourceKey = 0;
                     Entry->bTiledOverflowReadbackRelevant = false;
                     Entry->bTiledOverflowRecoveryProbePending = false;
                     Entry->bDelayedTiledFallbackActive = false;
                     Entry->DelayedTiledFallbackFramesRemaining = 0u;
-                }
-                else if (bSHChanged)
-                {
-                    Entry->SHBuffer.SafeRelease();
                 }
                 const bool bNewFrame = Entry->LastPublishFrame != Packet.FrameNumber;
                 if (!Entry->bVelocityHistoryValid || Packet.bResetVelocityHistory)
